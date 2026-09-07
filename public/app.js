@@ -1,7 +1,7 @@
 'use strict';
 
 const $ = selector => document.querySelector(selector);
-const state = { data: null, system: null, logs: [], serviceLogs: null, selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/' };
+const state = { data: null, system: null, logs: [], serviceLogs: null, selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/', domainSort: localStorage.getItem('mailposture-domain-sort') === 'alphabetical' ? 'alphabetical' : 'priority' };
 const names = { critical: 'Needs action', warning: 'Review', healthy: 'Healthy', info: 'Info', ignored: 'Ignored' };
 const themeQuery = matchMedia('(prefers-color-scheme: dark)');
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]);
@@ -25,6 +25,26 @@ function score(domain) {
 
 function issuesFor(domain) {
   return domain.checks.filter(check => ['critical', 'warning'].includes(check.status)).sort((a, b) => (a.status === b.status ? 0 : a.status === 'critical' ? -1 : 1));
+}
+
+function renderDomainMenu() {
+  const menu = $('#domain-menu-list');
+  if (!menu) return;
+  const domains = (state.data?.domains || []).map((domain, index) => ({ domain, index }));
+  const rank = { critical: 0, warning: 1, info: 2, ignored: 2, healthy: 3 };
+  domains.sort((a, b) => state.domainSort === 'alphabetical'
+    ? a.domain.domain.localeCompare(b.domain.domain)
+    : (rank[a.domain.status] ?? 4) - (rank[b.domain.status] ?? 4) || a.domain.domain.localeCompare(b.domain.domain));
+  menu.innerHTML = domains.length
+    ? domains.map(({ domain, index }) => `<button type="button" role="menuitem" data-menu-domain="${index}"${index === state.selected ? ' aria-current="true"' : ''}>${statusSymbol(domain.status)}<span>${esc(domain.domain)}</span><small>${esc(names[domain.status] || domain.status)}</small></button>`).join('')
+    : '<a href="/settings" data-route="/settings" role="menuitem">Add a monitored domain</a>';
+}
+
+function setDomainSort(mode, persist = true) {
+  state.domainSort = mode === 'alphabetical' ? 'alphabetical' : 'priority';
+  if (persist) localStorage.setItem('mailposture-domain-sort', state.domainSort);
+  document.querySelectorAll('input[name="domain-sort"]').forEach(input => { input.checked = input.value === state.domainSort; });
+  renderDomainMenu();
 }
 
 function tlsEndpoint(check, domain) {
@@ -97,13 +117,13 @@ function reportingOrganizationsCard(report, id = '') {
 
 function smtpDiagnosticsCard(report, id = '') {
   const endpoints = report?.endpoints || [];
-  if (!endpoints.length) return `<article${reportId(id)} class="report-card wide"><div class="report-card-header"><div><h3>SMTP service diagnostics</h3><p>Live checks of the domain’s published MX hosts on TCP port 25.</p></div></div><p class="report-empty">No SMTP diagnostic results are available.</p></article>`;
+  if (!endpoints.length) return `<article${reportId(id)} class="report-card wide"><div class="report-card-header"><div><h3>MX endpoint results</h3><p>Live checks of the domain’s published MX hosts on TCP port 25.</p></div></div><p class="report-empty">No SMTP diagnostic results are available.</p></article>`;
   const endpointCards = endpoints.map(endpoint => {
     const tests = (endpoint.tests || []).map(test => `<div class="smtp-test ${esc(test.status)}"><span>${statusSymbol(test.status)}</span><div><strong>${esc(test.label)}</strong><small>${esc(test.detail)}</small></div><b>${esc(test.value)}</b></div>`).join('');
     const transcript = endpoint.transcript?.length ? `<details class="smtp-transcript"><summary>Session transcript</summary><p>The probe uses reserved example addresses and stops before DATA. No message content is sent.</p><pre>${esc(endpoint.transcript.join('\n'))}</pre></details>` : '';
     return `<section class="smtp-endpoint"><div class="smtp-endpoint-heading"><div><strong>${esc(endpoint.host)}:${number(endpoint.port || 25)}</strong><span>${esc(endpoint.ip_address || 'Address unavailable')}</span></div><span class="state ${esc(endpoint.status)}">${esc(names[endpoint.status] || endpoint.status)}</span></div><div class="smtp-tests">${tests}</div>${transcript}</section>`;
   }).join('');
-  return `<article${reportId(id)} class="report-card wide"><div class="report-card-header"><div><h3>SMTP service diagnostics</h3><p>Connection speed, server identity, STARTTLS, and relay protection for each published MX host.</p></div></div><p class="report-explanation">Connection and transaction times at or above 5 seconds need review; times at or above 15 seconds need action. The relay probe never sends DATA or message content. Acceptance from a trusted local network requires a second test from outside the organization before it can be called an open relay.</p><div class="smtp-endpoints">${endpointCards}</div></article>`;
+  return `<article${reportId(id)} class="report-card wide"><div class="report-card-header"><div><h3>MX endpoint results</h3><p>Connection speed, server identity, STARTTLS, and relay protection for each published MX host.</p></div></div><p class="report-explanation">Connection and transaction times at or above 5 seconds need review; times at or above 15 seconds need action. The relay probe never sends DATA or message content. Acceptance from a trusted local network requires a second test from outside the organization before it can be called an open relay.</p><div class="smtp-endpoints">${endpointCards}</div></article>`;
 }
 
 function detailCards(reports) {
@@ -161,7 +181,8 @@ function renderDashboard() {
   const domainScores = data.domains.map(score);
   const master = Math.round(domainScores.reduce((total, value) => total + value, 0) / domainScores.length);
   const issueCount = data.domains.reduce((total, domain) => total + issuesFor(domain).length, 0);
-  $('#master-score').innerHTML = `<strong>${master}</strong><span>Master score out of 100</span><div class="bar"><i style="width:${master}%"></i></div>`;
+  const masterStatus = data.domains.some(domain => domain.status === 'critical') ? 'critical' : data.domains.some(domain => domain.status === 'warning') ? 'warning' : 'healthy';
+  $('#master-score').innerHTML = `<span class="score-watermark status-symbol ${masterStatus}" aria-hidden="true"></span><div class="score-content"><strong>${master}</strong><span>Master score out of 100</span><div class="bar"><i style="width:${master}%"></i></div></div>`;
   $('#domain-scores').innerHTML = data.domains.map((domain, index) => {
     const value = domainScores[index];
     const ignored = domain.counts.ignored ? ` · ${domain.counts.ignored} ignored` : '';
@@ -183,17 +204,17 @@ function renderDomain() {
   $('#updated').textContent = ago(data.generated_at);
   if (data.error && !data.domains.length) {
     $('#hero').innerHTML = '<div><small>Configuration needed</small><h1>Check the saved settings.</h1></div>';
-    $('#domains').innerHTML = '';
     $('#checks').innerHTML = '';
     $('#attention').innerHTML = `<div class="error">${esc(data.error)}</div>`;
+    $('#domain-issue-count').textContent = 'Unavailable';
     $('#domain-reports').innerHTML = '';
     return;
   }
   if (!data.domains.length) {
     $('#hero').innerHTML = '<div><small>Configuration needed</small><h1>Add your first mail domain.</h1><p>Open Settings to choose domains, selectors, and certificate endpoints.</p><a class="primary-link" href="/settings" data-route="/settings">Open Settings →</a></div>';
-    $('#domains').innerHTML = '';
     $('#checks').innerHTML = '';
     $('#attention').innerHTML = '<div class="clear">No domains are configured yet.</div>';
+    $('#domain-issue-count').textContent = 'Clear';
     $('#domain-reports').innerHTML = '';
     return;
   }
@@ -201,9 +222,11 @@ function renderDomain() {
   const domain = data.domains[state.selected];
   const issues = issuesFor(domain);
   const posture = score(domain);
-  $('#hero').innerHTML = `<div><small>${esc(domain.domain)} · Current posture</small><h1>${domain.counts.critical ? `${domain.counts.critical} issue${domain.counts.critical === 1 ? '' : 's'} need attention.` : domain.counts.warning ? 'Protected, with room to improve.' : 'Mail controls look solid.'}</h1><p>Live policy checks and observed authentication results, translated into the next useful action.</p></div><div class="score"><strong>${posture}</strong><span>Posture score out of 100</span><div class="bar"><i style="width:${posture}%"></i></div></div>`;
-  $('#domains').innerHTML = data.domains.map((value, index) => `<button class="domain ${index === state.selected ? 'active' : ''}" data-domain="${index}">${statusSymbol(value.status)}${esc(value.domain)}</button>`).join('');
-  $('#attention').innerHTML = issues.length ? `<div class="attention-head"><h2>Attention queue</h2><span class="pill">${issues.length} open</span></div>${issues.map(check => `<article class="issue ${check.status}"><span class="issue-status">${statusSymbol(check.status)}</span><span class="control">${esc(check.label)}</span><div><h3>${esc(check.summary)}</h3><p>${esc(check.action)}</p></div><button class="view" data-check="${esc(check.id)}">View →</button></article>`).join('')}` : '<div class="attention-head"><h2>Attention queue</h2><span class="pill">Clear</span></div><div class="clear">No immediate actions. Every configured control passed its threshold.</div>';
+  const issueHeading = domain.counts.critical ? `${domain.counts.critical} issue${domain.counts.critical === 1 ? ' needs' : 's need'} attention.` : domain.counts.warning ? 'Protected, with room to improve.' : 'Mail controls look solid.';
+  $('#hero').innerHTML = `<div><small>${esc(domain.domain)} · Current posture</small><h1>${issueHeading}</h1><p>Live policy checks and observed authentication results, translated into the next useful action.</p></div><div class="score"><span class="score-watermark status-symbol ${esc(domain.status)}" aria-hidden="true"></span><div class="score-content"><strong>${posture}</strong><span>Posture score out of 100</span><div class="bar"><i style="width:${posture}%"></i></div></div></div>`;
+  $('#domain-issue-count').textContent = issues.length ? `${issues.length} open` : 'Clear';
+  $('#attention').innerHTML = issues.length ? issues.map(check => `<article class="issue ${check.status}"><span class="issue-status">${statusSymbol(check.status)}</span><span class="control">${esc(check.label)}</span><div><h3>${esc(check.summary)}</h3><p>${esc(check.action)}</p></div><button class="view" data-check="${esc(check.id)}">View →</button></article>`).join('') : '<div class="clear">No immediate actions. Every configured control passed its threshold.</div>';
+  renderDomainMenu();
   $('#checks').innerHTML = domain.checks.map(check => {
     const endpoint = tlsEndpoint(check, domain.domain);
     const days = check.label === 'TLS certificate' && Number.isFinite(Number(check.evidence?.days_remaining)) ? Number(check.evidence.days_remaining) : null;
@@ -219,6 +242,7 @@ function renderStatus() {
   $('#updated').textContent = ago(state.data.generated_at);
   renderDashboard();
   renderDomain();
+  renderDomainMenu();
 }
 
 function systemSettingsSection(check) {
@@ -248,10 +272,11 @@ function systemCheckDetails(check) {
 function renderSystemStatus() {
   const data = state.system;
   if (!data) return;
-  const nav = $('#system-status-tab');
-  nav.classList.remove('system-healthy', 'system-warning', 'system-critical');
-  nav.classList.add(`system-${data.status || 'warning'}`);
-  nav.setAttribute('aria-label', `System Status: ${names[data.status] || 'Unavailable'}`);
+  const indicator = $('#system-status-indicator');
+  const indicatorStatus = data.status || 'warning';
+  indicator.innerHTML = `<span class="status-symbol ${esc(indicatorStatus)}" aria-hidden="true"></span>`;
+  indicator.setAttribute('aria-label', `System Status: ${names[indicatorStatus] || 'Unavailable'}`);
+  indicator.title = `System Status: ${names[indicatorStatus] || 'Unavailable'}`;
   $('#system-status-updated').textContent = data.checked_at ? `Checked ${new Date(data.checked_at).toLocaleString()}` : 'Check unavailable';
   if (data.error) {
     $('#system-status-summary').innerHTML = `${statusSymbol('critical')}<div><strong>Unavailable</strong><span>System checks could not be completed.</span></div>`;
@@ -704,6 +729,8 @@ function normalizedRoute(pathname) {
 async function showRoute(pathname, push = false) {
   const route = normalizedRoute(pathname);
   state.route = route;
+  $('#domain-menu-list').hidden = true;
+  $('#domain-menu-button').setAttribute('aria-expanded', 'false');
   document.title = `${{ '/': 'Dashboard', '/domains': 'Domains', '/status': 'System Status', '/settings': 'Settings', '/help': 'Help' }[route]} · MailPosture`;
   if (push) history.pushState({}, '', route);
   const viewByRoute = { '/': '#dashboard-view', '/domains': '#domains-view', '/status': '#system-status-view', '/settings': '#settings-view', '/help': '#help-view' };
@@ -716,6 +743,7 @@ async function showRoute(pathname, push = false) {
     link.classList.toggle('active', active);
     if (active) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
   });
+  $('#domain-menu-button').classList.toggle('active', route === '/domains');
   if (route === '/settings' && !state.settingsLoaded) {
     try { await loadSettings(); } catch (error) { $('#settings-message').textContent = error.message; $('#settings-message').className = 'failure'; }
   }
@@ -746,6 +774,15 @@ $('#selector-add').onclick = addSelector;
 $('#endpoint-add').onclick = addEndpoint;
 document.querySelectorAll('.domain-cancel').forEach(button => { button.onclick = () => $('#domain-dialog').close(); });
 document.querySelectorAll('input[name="theme"]').forEach(input => { input.onchange = () => setTheme(input.value); });
+document.querySelectorAll('input[name="domain-sort"]').forEach(input => { input.onchange = () => setDomainSort(input.value); });
+$('#domain-menu-button').onclick = event => {
+  event.stopPropagation();
+  const menu = $('#domain-menu-list');
+  const opening = menu.hidden;
+  menu.hidden = !opening;
+  $('#domain-menu-button').setAttribute('aria-expanded', String(opening));
+  if (opening) menu.querySelector('[aria-current="true"],button,a')?.focus();
+};
 $('#report-source').onchange = updateSettingsVisibility;
 $('#mailbox-enabled').onchange = updateSettingsVisibility;
 $('#snapshots-enabled').onchange = updateSettingsVisibility;
@@ -776,6 +813,10 @@ document.querySelectorAll('[data-settings-tab]').forEach(tab => {
 themeQuery.addEventListener?.('change', () => { if ((localStorage.getItem('mailposture-theme') || 'system') === 'system') setTheme('system', false); });
 
 document.onclick = event => {
+  if (!event.target.closest('.domain-menu')) {
+    $('#domain-menu-list').hidden = true;
+    $('#domain-menu-button').setAttribute('aria-expanded', 'false');
+  }
   const route = event.target.closest('[data-route]');
   if (route) { event.preventDefault(); showRoute(route.getAttribute('href'), true); return; }
   const systemSettings = event.target.closest('[data-system-settings]');
@@ -794,6 +835,14 @@ document.onclick = event => {
   }
   const openDomain = event.target.closest('[data-open-domain]');
   if (openDomain) { state.selected = Number(openDomain.dataset.openDomain); showRoute('/domains', true); return; }
+  const menuDomain = event.target.closest('[data-menu-domain]');
+  if (menuDomain) {
+    state.selected = Number(menuDomain.dataset.menuDomain);
+    $('#domain-menu-list').hidden = true;
+    $('#domain-menu-button').setAttribute('aria-expanded', 'false');
+    showRoute('/domains', true);
+    return;
+  }
   const domain = event.target.closest('[data-domain]');
   if (domain) { state.selected = Number(domain.dataset.domain); renderDomain(); return; }
   const dashboardCheck = event.target.closest('[data-dashboard-check]');
@@ -842,6 +891,13 @@ document.onclick = event => {
 };
 
 window.onpopstate = () => showRoute(location.pathname);
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !$('#domain-menu-list').hidden) {
+    $('#domain-menu-list').hidden = true;
+    $('#domain-menu-button').setAttribute('aria-expanded', 'false');
+    $('#domain-menu-button').focus();
+  }
+});
 $('#detail-dialog .close').onclick = () => $('#detail-dialog').close();
 $('#detail-dialog').onclick = event => { if (event.target === $('#detail-dialog')) $('#detail-dialog').close(); };
 $('#domain-dialog').onclick = event => { if (event.target === $('#domain-dialog')) $('#domain-dialog').close(); };
@@ -850,6 +906,7 @@ $('#endpoint-host').onkeydown = event => { if (event.key === 'Enter') { event.pr
 $('#endpoint-port').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); addEndpoint(); } };
 
 setTheme(localStorage.getItem('mailposture-theme') || 'system', false);
+setDomainSort(state.domainSort, false);
 showRoute(location.pathname);
 loadStatus();
 loadSystemStatus();

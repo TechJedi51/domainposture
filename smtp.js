@@ -148,6 +148,13 @@ function smtpCapabilities(lines) {
   return (lines || []).map(line => String(line).replace(/^250[- ]/i, '').trim().split(/\s+/)[0].toUpperCase()).filter(Boolean);
 }
 
+function policyBlock(response) {
+  const detail = (response?.lines || []).join(' ');
+  return response?.code >= 400 && /(?:access denied|blocked|not permitted|policy rejection|client host rejected)/i.test(detail)
+    ? { code: response.code, detail: safeLine(detail) }
+    : null;
+}
+
 async function reverseIdentity(ip, resolver = dns) {
   const identity = { reverse_dns: [], forward_confirmed: false };
   if (!ip) return identity;
@@ -192,19 +199,11 @@ async function probeSmtp(host, options = {}) {
     evidence.capabilities = smtpCapabilities(hello.lines);
     evidence.starttls_advertised = evidence.capabilities.includes('STARTTLS');
 
-    const mail = await reader.command('MAIL FROM:<probe@example.com>');
-    evidence.mail_from_code = mail.code;
-    if (mail.code >= 200 && mail.code < 300) {
-      const recipient = await reader.command('RCPT TO:<probe@example.net>');
-      evidence.rcpt_to_code = recipient.code;
-      evidence.relay_status = recipient.code >= 200 && recipient.code < 300 ? 'potential' : recipient.code >= 500 ? 'denied' : 'inconclusive';
-      await reader.command('RSET').catch(() => null);
-    } else evidence.relay_status = 'inconclusive';
-    evidence.transaction_time_ms = Date.now() - started;
-
     if (evidence.starttls_advertised) {
       const starttls = await reader.command('STARTTLS');
       evidence.starttls_code = starttls.code;
+      const blocked = policyBlock(starttls);
+      if (blocked) Object.assign(evidence, { policy_blocked: true, policy_blocked_command: 'STARTTLS', policy_response_code: blocked.code, policy_response: blocked.detail });
       if (starttls.code === 220) {
         reader.cleanup();
         socket = await upgradeTls(socket, evidence.host, timeoutMs);
@@ -221,6 +220,23 @@ async function probeSmtp(host, options = {}) {
       }
     }
 
+    if (!evidence.policy_blocked && (!evidence.starttls_advertised || evidence.starttls_negotiated)) {
+      const mail = await reader.command('MAIL FROM:<probe@example.com>');
+      evidence.mail_from_code = mail.code;
+      const blocked = policyBlock(mail);
+      if (blocked) Object.assign(evidence, { policy_blocked: true, policy_blocked_command: 'MAIL FROM', policy_response_code: blocked.code, policy_response: blocked.detail });
+      if (mail.code >= 200 && mail.code < 300) {
+        const recipient = await reader.command('RCPT TO:<probe@example.net>');
+        evidence.rcpt_to_code = recipient.code;
+        evidence.relay_status = recipient.code >= 200 && recipient.code < 300 ? 'potential' : recipient.code >= 500 ? 'denied' : 'inconclusive';
+        await reader.command('RSET').catch(() => null);
+      } else evidence.relay_status = 'inconclusive';
+    } else {
+      evidence.relay_status = 'inconclusive';
+      evidence.relay_probe_skipped = evidence.policy_blocked ? 'The server blocked the monitoring source.' : 'STARTTLS could not be negotiated.';
+    }
+    evidence.transaction_time_ms = Date.now() - started;
+
     await reader.command('QUIT').catch(() => null);
   } catch (error) {
     evidence.error = safeLine(error.message);
@@ -232,7 +248,8 @@ async function probeSmtp(host, options = {}) {
     socket?.destroy();
   }
   Object.assign(evidence, await reverseIdentity(evidence.ip_address, options.resolver || dns));
-  evidence.reverse_dns_match = evidence.reverse_dns.includes(evidence.host) && evidence.forward_confirmed;
+  evidence.ptr_matches_host = evidence.reverse_dns.includes(evidence.host);
+  evidence.reverse_dns_match = evidence.ptr_matches_host && evidence.forward_confirmed;
   evidence.banner_matches_reverse_dns = Boolean(evidence.banner_hostname && evidence.reverse_dns.includes(evidence.banner_hostname));
   return evidence;
 }
@@ -246,14 +263,23 @@ function timingTest(label, milliseconds, warningMs, criticalMs) {
 
 function evaluateSmtpEvidence(host, evidence) {
   const ptr = evidence.reverse_dns?.[0] || null;
+  const ptrMatchesHost = evidence.ptr_matches_host ?? evidence.reverse_dns?.includes(normalizedHost(host));
+  const reverseDnsTest = !ptr
+    ? { label: 'SMTP Reverse DNS', status: 'warning', value: 'Review — No PTR record', detail: 'No PTR record was found for the connected address.' }
+    : ptrMatchesHost && evidence.forward_confirmed
+      ? { label: 'SMTP Reverse DNS', status: 'healthy', value: `OK — ${evidence.ip_address} resolves to ${host}`, detail: `PTR record ${ptr} matches the MX host and resolves back to the connected address.` }
+      : ptrMatchesHost
+        ? { label: 'SMTP Reverse DNS', status: 'info', value: 'PTR matches MX; forward confirmation unavailable', detail: `PTR record ${ptr} matches the MX host, but its current address records did not include the connected address. This can occur with a shared or load-balanced mail service.` }
+        : { label: 'SMTP Reverse DNS', status: 'warning', value: 'Review — PTR does not match MX host', detail: `PTR records: ${evidence.reverse_dns.join(', ')}${evidence.forward_confirmed ? '' : '; forward confirmation also failed'}.` };
+  const blockedDetail = evidence.policy_response || 'The server rejected commands from the monitoring source address.';
   const tests = [
     timingTest('SMTP Connection Time', evidence.connection_time_ms, CONNECTION_WARNING_MS, CONNECTION_CRITICAL_MS),
     timingTest('SMTP Transaction Time', evidence.transaction_time_ms, TRANSACTION_WARNING_MS, TRANSACTION_CRITICAL_MS),
-    { label: 'SMTP Reverse DNS Mismatch', status: evidence.reverse_dns_match ? 'healthy' : 'warning', value: evidence.reverse_dns_match ? `OK — ${evidence.ip_address} resolves to ${host}` : 'Review', detail: evidence.reverse_dns?.length ? `PTR records: ${evidence.reverse_dns.join(', ')}${evidence.forward_confirmed ? '' : '; forward confirmation failed'}.` : 'No PTR record was found for the connected address.' },
+    reverseDnsTest,
     { label: 'SMTP Valid Hostname', status: ptr && validHostname(ptr) ? 'healthy' : 'warning', value: ptr && validHostname(ptr) ? 'OK — Reverse DNS is a valid hostname' : 'Review', detail: ptr && validHostname(ptr) ? `${ptr} is a valid fully qualified host name.` : ptr ? `${ptr} is not a valid fully qualified host name.` : 'A reverse-DNS host name was not available.' },
     { label: 'SMTP Banner Check', status: evidence.banner_matches_reverse_dns ? 'healthy' : 'warning', value: evidence.banner_matches_reverse_dns ? 'OK — Reverse DNS matches SMTP banner' : 'Review', detail: `Banner host: ${evidence.banner_hostname || 'not identified'}; reverse DNS: ${ptr || 'not found'}.` },
-    { label: 'SMTP TLS', status: evidence.starttls_negotiated && evidence.tls_authorized ? 'healthy' : evidence.starttls_negotiated ? 'warning' : 'critical', value: evidence.starttls_negotiated ? evidence.tls_authorized ? 'OK — STARTTLS negotiated with a trusted certificate' : 'Review — STARTTLS certificate is not trusted' : 'Failed — STARTTLS was not negotiated', detail: evidence.starttls_negotiated ? `${evidence.tls_protocol || 'TLS'}${evidence.tls_cipher ? ` using ${evidence.tls_cipher}` : ''}${evidence.tls_authorization_error ? `; ${evidence.tls_authorization_error}` : ''}.` : evidence.starttls_advertised ? `The server advertised STARTTLS but negotiation failed${evidence.error ? `: ${evidence.error}` : '.'}` : 'The server did not advertise STARTTLS.' },
-    { label: 'SMTP Open Relay', status: evidence.relay_status === 'denied' ? 'healthy' : 'warning', value: evidence.relay_status === 'denied' ? 'OK — Relay attempt denied' : evidence.relay_status === 'potential' ? 'External verification required — Recipient accepted' : 'Inconclusive', detail: evidence.relay_status === 'potential' ? 'The server accepted an unauthenticated recipient outside the tested domain from MailPosture’s network location. This can be expected when the server trusts the local network and does not prove that it is open to the internet. No DATA command or message content was sent.' : evidence.relay_status === 'denied' ? `The external recipient was rejected with SMTP ${evidence.rcpt_to_code}.` : 'The server did not reach a definitive external-recipient decision. No DATA command or message content was sent.' }
+    { label: 'SMTP TLS', status: evidence.policy_blocked && !evidence.starttls_negotiated ? 'info' : evidence.starttls_negotiated && evidence.tls_authorized ? 'healthy' : evidence.starttls_negotiated ? 'warning' : 'critical', value: evidence.policy_blocked && !evidence.starttls_negotiated ? 'Not tested — Server policy blocked the probe' : evidence.starttls_negotiated ? evidence.tls_authorized ? 'OK — STARTTLS negotiated with a trusted certificate' : 'Review — STARTTLS certificate is not trusted' : 'Failed — STARTTLS was not negotiated', detail: evidence.policy_blocked && !evidence.starttls_negotiated ? `${blockedDetail} This does not demonstrate a TLS failure for other senders.` : evidence.starttls_negotiated ? `${evidence.tls_protocol || 'TLS'}${evidence.tls_cipher ? ` using ${evidence.tls_cipher}` : ''}${evidence.tls_authorization_error ? `; ${evidence.tls_authorization_error}` : ''}.` : evidence.starttls_advertised ? `The server advertised STARTTLS but negotiation failed${evidence.error ? `: ${evidence.error}` : '.'}` : 'The server did not advertise STARTTLS.' },
+    { label: 'SMTP Open Relay', status: evidence.policy_blocked ? 'info' : evidence.relay_status === 'denied' ? 'healthy' : 'warning', value: evidence.policy_blocked ? 'Not tested — Server policy blocked the probe' : evidence.relay_status === 'denied' ? 'OK — Relay attempt denied' : evidence.relay_status === 'potential' ? 'External verification required — Recipient accepted' : 'Inconclusive', detail: evidence.policy_blocked ? `${blockedDetail} The external-recipient command was not reached. No DATA command or message content was sent.` : evidence.relay_status === 'potential' ? 'The server accepted an unauthenticated recipient outside the tested domain from MailPosture’s network location. This can be expected when the server trusts the local network and does not prove that it is open to the internet. No DATA command or message content was sent.' : evidence.relay_status === 'denied' ? `The external recipient was rejected with SMTP ${evidence.rcpt_to_code}.` : 'The server did not reach a definitive external-recipient decision. No DATA command or message content was sent.' }
   ];
   if (evidence.error && !evidence.greeting_code) {
     tests[0] = { label: 'SMTP Connection Time', status: 'critical', value: 'Connection failed', detail: evidence.error };
@@ -262,17 +288,19 @@ function evaluateSmtpEvidence(host, evidence) {
     tests[5] = { label: 'SMTP TLS', status: 'info', value: 'Not run', detail: 'STARTTLS could not be tested without an SMTP greeting.' };
     tests[6] = { label: 'SMTP Open Relay', status: 'info', value: 'Not run', detail: 'The relay-safety probe could not start. No message content was sent.' };
   }
-  const status = tests.reduce((current, test) => STATUS_RANK[test.status] > STATUS_RANK[current] ? test.status : current, 'healthy');
+  let status = tests.reduce((current, test) => STATUS_RANK[test.status] > STATUS_RANK[current] ? test.status : current, 'healthy');
+  if (status === 'healthy' && tests.some(test => test.status === 'info')) status = 'info';
   return { ...evidence, host: normalizedHost(host), status, tests };
 }
 
 function smtpResult(domain, mxRecords, endpoints) {
   if (!mxRecords.length) return { id: 'smtp_service', label: 'SMTP service', status: 'warning', summary: 'No MX hosts configured', detail: 'No SMTP server could be selected from the domain’s MX records.', action: 'Publish an MX record or confirm that this domain intentionally does not receive email.', evidence: { domain, mx: [], endpoints: [] } };
-  const status = endpoints.reduce((current, endpoint) => STATUS_RANK[endpoint.status] > STATUS_RANK[current] ? endpoint.status : current, 'healthy');
+  let status = endpoints.reduce((current, endpoint) => STATUS_RANK[endpoint.status] > STATUS_RANK[current] ? endpoint.status : current, 'healthy');
+  if (status === 'healthy' && endpoints.some(endpoint => endpoint.status === 'info')) status = 'info';
   const affected = endpoints.filter(endpoint => endpoint.status !== 'healthy');
-  const summary = status === 'healthy' ? `${endpoints.length} MX host${endpoints.length === 1 ? '' : 's'} ready` : `${affected.length} of ${endpoints.length} MX host${endpoints.length === 1 ? '' : 's'} need${affected.length === 1 ? 's' : ''} attention`;
-  const detail = status === 'healthy' ? 'Connection, identity, STARTTLS, and relay-safety checks passed.' : affected.map(endpoint => `${endpoint.host}: ${endpoint.tests.filter(test => ['warning', 'critical'].includes(test.status)).map(test => test.label).join(', ')}`).join(' · ');
-  const action = endpoints.some(endpoint => endpoint.tests[0]?.status === 'critical') ? 'Confirm that the MX host is reachable on TCP port 25 and review its SMTP service and network logs.' : endpoints.some(endpoint => !endpoint.starttls_negotiated || endpoint.tls_authorized === false) ? 'Correct STARTTLS or certificate trust on the affected MX host, then run checks again.' : endpoints.some(endpoint => ['warning', 'critical'].includes(endpoint.tests[0]?.status) || ['warning', 'critical'].includes(endpoint.tests[1]?.status)) ? 'Review SMTP service load, DNS, network latency, and connection filtering on the affected host.' : endpoints.some(endpoint => endpoint.relay_status === 'potential') ? 'Repeat the relay test from a network outside your organization. If an external probe also accepts the recipient, restrict unauthenticated relaying immediately.' : 'Correct reverse DNS or the SMTP greeting so the connected address, PTR record, and banner use the intended host name.';
+  const summary = status === 'healthy' ? `${endpoints.length} MX host${endpoints.length === 1 ? '' : 's'} ready` : status === 'info' ? `${affected.length} MX host${affected.length === 1 ? '' : 's'} not fully tested` : `${affected.length} of ${endpoints.length} MX host${endpoints.length === 1 ? '' : 's'} need${affected.length === 1 ? 's' : ''} attention`;
+  const detail = status === 'healthy' ? 'Connection, identity, STARTTLS, and relay-safety checks passed.' : affected.map(endpoint => `${endpoint.host}: ${endpoint.tests.filter(test => status === 'info' ? test.status === 'info' : ['warning', 'critical'].includes(test.status)).map(test => test.label).join(', ')}`).join(' · ');
+  const action = endpoints.some(endpoint => endpoint.policy_blocked) ? 'Run MailPosture from a permitted static address or another external monitoring location. The receiving service blocked this probe source; this does not show that normal mail delivery or STARTTLS is broken.' : endpoints.some(endpoint => endpoint.tests[0]?.status === 'critical') ? 'Confirm that the MX host is reachable on TCP port 25 and review its SMTP service and network logs.' : endpoints.some(endpoint => !endpoint.starttls_negotiated || endpoint.tls_authorized === false) ? 'Correct STARTTLS or certificate trust on the affected MX host, then run checks again.' : endpoints.some(endpoint => ['warning', 'critical'].includes(endpoint.tests[0]?.status) || ['warning', 'critical'].includes(endpoint.tests[1]?.status)) ? 'Review SMTP service load, DNS, network latency, and connection filtering on the affected host.' : endpoints.some(endpoint => endpoint.relay_status === 'potential') ? 'Repeat the relay test from a network outside your organization. If an external probe also accepts the recipient, restrict unauthenticated relaying immediately.' : 'Correct reverse DNS or the SMTP greeting so the connected address, PTR record, and banner use the intended host name.';
   return { id: 'smtp_service', label: 'SMTP service', status, summary, detail, action, evidence: { domain, mx: mxRecords, endpoints, relay_probe_safety: 'Uses reserved example.com/example.net addresses and stops before DATA; no message content is transmitted.' } };
 }
 

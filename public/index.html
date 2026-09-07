@@ -21,24 +21,28 @@
   <header>
     <a class="brand" href="/" data-route="/">
       <img src="/mailposture.svg" alt="">
-      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v1.4.0</small></span>
+      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v1.5.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
       <a class="toolbar-button" href="/" data-route="/"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span>Dashboard</span></a>
-      <a class="toolbar-button" href="/domains" data-route="/domains"><span class="toolbar-icon monitored-domains-icon" aria-hidden="true"></span><span>Domains</span></a>
+      <div class="domain-menu">
+        <button id="domain-menu-button" class="toolbar-button" type="button" aria-haspopup="menu" aria-expanded="false"><span class="toolbar-icon monitored-domains-icon" aria-hidden="true"></span><span>Domains</span><span class="menu-chevron" aria-hidden="true">⌄</span></button>
+        <div id="domain-menu-list" class="domain-menu-list" role="menu" hidden></div>
+      </div>
       <a id="system-status-tab" class="toolbar-button" href="/status" data-route="/status"><span class="toolbar-icon system-status-icon" aria-hidden="true"></span><span>System Status</span></a>
     </nav>
     <div class="header-actions">
       <span id="updated">Starting checks…</span>
       <button id="refresh" class="toolbar-button"><span class="toolbar-icon run-checks-icon" aria-hidden="true"></span><span class="toolbar-label">Run checks</span></button>
       <a class="symbol-button" href="/help" data-route="/help" aria-label="Help" title="Help">?</a>
+      <a id="system-status-indicator" class="symbol-button" href="/status" data-route="/status" aria-label="System Status: Checking" title="System Status"><span class="status-symbol warning" aria-hidden="true"></span></a>
       <a class="symbol-button" href="/settings" data-route="/settings" aria-label="Settings" title="Settings"><span class="toolbar-icon settings-icon" aria-hidden="true"></span></a>
     </div>
   </header>
 
   <main id="dashboard-view" hidden>
     <section class="page-intro dashboard-intro">
-      <div><small>Organization overview</small><h1>Mail security dashboard</h1><p>One view of posture, domain health, and every issue that needs attention.</p></div>
+      <div><small>Organization overview</small><h1>Mail Security Dashboard</h1><p>One view of posture, domain health, and every issue that needs attention.</p></div>
       <div id="master-score" class="score master-score"></div>
     </section>
     <section class="overview-section">
@@ -46,7 +50,7 @@
       <div id="domain-scores" class="domain-scores"></div>
     </section>
     <section class="overview-section report-overview">
-      <div class="heading"><div><small>Reports</small><h2>Organization report summary</h2></div><p>DMARC authentication and SMTP TLS delivery results for the selected history window.</p></div>
+      <div class="heading"><div><small>Reports</small><h2>Organization report summary</h2></div></div>
       <div id="organization-reports" class="report-grid"></div>
     </section>
     <section class="overview-section dashboard-attention">
@@ -57,7 +61,7 @@
 
   <main id="domains-view" hidden>
     <section id="hero" class="hero"></section>
-    <nav id="domains" aria-label="Domains"></nav>
+    <div class="heading domain-attention-heading"><div><small>Attention</small><h2>Attention queue</h2></div><span id="domain-issue-count" class="pill"></span></div>
     <section id="attention" class="attention"></section>
     <section class="matrix">
       <div class="heading"><div><small>Control matrix</small><h2>Everything at a glance</h2></div><p>Open a control for evidence and its next step.</p></div>
@@ -119,6 +123,8 @@
         <div class="settings-panel preferences-panel">
           <div><h2>Appearance</h2><p>System follows this device’s appearance setting.</p></div>
           <fieldset class="theme-picker"><legend>Color mode</legend><label><input type="radio" name="theme" value="light"><span>☀ Light</span></label><label><input type="radio" name="theme" value="dark"><span>◐ Dark</span></label><label><input type="radio" name="theme" value="system"><span>◑ System</span></label></fieldset>
+          <div><h3>Domain menu order</h3><p>Show domains by status priority or alphabetically.</p></div>
+          <fieldset class="theme-picker domain-sort-picker"><legend>Domain menu order</legend><label><input type="radio" name="domain-sort" value="priority"><span>Priority</span></label><label><input type="radio" name="domain-sort" value="alphabetical"><span>Alphabetical</span></label></fieldset>
           <p class="settings-note">MailPosture uses SEAL Systems blue for controls and navigation. Status colors remain distinct: red needs action, yellow needs review, and green is healthy.</p>
         </div>
       </section>
@@ -199,7 +205,7 @@
         <article><h3>DKIM</h3><p>Checks each configured selector for a published public key and reports missing, revoked, or weak RSA keys. Selectors must be entered because DNS cannot reliably discover them.</p></article>
         <article><h3>MTA-STS</h3><p>Checks the DNS signal, HTTPS policy file, policy mode, and whether the policy covers every published MX host.</p></article>
         <article><h3>TLS reporting</h3><p>Looks up <code>_smtp._tls</code>, requires exactly one TLSRPTv1 policy, validates its syntax, and validates each mailto or HTTPS rua destination. It also summarizes stacked SMTP session results, reporting organizations, and failure types from parsedmarc. The values count SMTP sessions, not messages. Processed reports normally move to <code>Archive/SMTP-TLS</code>; MailPosture reads the normalized OpenSearch data.</p></article>
-        <article><h3>SMTP service</h3><p>Tests each published MX host on TCP port 25 for connection and transaction time, forward-confirmed reverse DNS, a valid host name, banner alignment, STARTTLS negotiation and certificate trust, and unauthenticated relay protection. Results reflect MailPosture’s network location, and the container must be allowed outbound TCP port 25. The relay probe uses reserved example addresses and stops before DATA, so it never sends a message. If the server accepts the recipient from MailPosture’s network, verify from an external network because a locally trusted source can relay by design.</p></article>
+        <article><h3>SMTP service</h3><p>Tests each published MX host on TCP port 25 for connection and transaction time, reverse DNS, a valid host name, banner alignment, STARTTLS negotiation and certificate trust, and unauthenticated relay protection. MailPosture negotiates STARTTLS before its envelope-only relay probe. Results reflect MailPosture’s network location, and the container must be allowed outbound TCP port 25. If a provider blocks the monitoring source, TLS and relay checks are labeled Not tested rather than failed. The probe uses reserved example addresses and stops before DATA, so it never sends a message.</p></article>
         <article><h3>TLS certificates</h3><p>Connects to configured direct-TLS endpoints, validates trust, and reports days until expiration. SMTP STARTTLS for published MX hosts is tested separately by SMTP service diagnostics.</p></article>
         <article><h3>BIMI</h3><p>Checks the BIMI record, DMARC prerequisites, HTTPS logo, safe SVG content, and whether a mark certificate URL is published. After validation, the logo appears on the BIMI control card through MailPosture’s same-origin image endpoint. You can independently ignore an intentionally self-asserted logo or intentionally absent logo permanently or for 1–120 months. Invalid records, unsafe logos, and unmet DMARC requirements remain actionable.</p></article>
         <article><h3>IP and domain reputation</h3><p>Screens the monitored domain and its receiving MX addresses against Spamhaus DBL, Spamhaus ZEN, and SpamCop through DNS. It is not a complete reputation score or a deliverability guarantee. Outbound sending services can use different IP addresses and should be checked separately. An unavailable provider is never reported as clean.</p></article>
