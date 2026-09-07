@@ -19,7 +19,7 @@ function ago(value) {
 }
 
 function score(domain) {
-  const weights = { critical: 0, warning: .55, info: .8, ignored: 1, healthy: 1 };
+  const weights = { critical: 0, warning: .55, info: 1, ignored: 1, healthy: 1 };
   return domain.checks.length ? Math.round(domain.checks.reduce((total, check) => total + weights[check.status], 0) / domain.checks.length * 100) : 0;
 }
 
@@ -34,14 +34,15 @@ function tlsEndpoint(check, domain) {
 
 function trendChart(points, successKey, failureKey, label) {
   if (!points?.length) return '<p class="report-empty">No daily trend is available for this period.</p>';
+  const hasFailures = points.some(point => Number(point[failureKey] || 0) > 0);
   const maximum = Math.max(1, ...points.map(point => Number(point[successKey] || 0) + Number(point[failureKey] || 0)));
   const columns = points.map(point => {
     const success = Number(point[successKey] || 0); const failed = Number(point[failureKey] || 0);
     const successHeight = Math.max(success ? 2 : 0, success / maximum * 100); const failedHeight = Math.max(failed ? 2 : 0, failed / maximum * 100);
     const date = new Date(`${String(point.date).slice(0, 10)}T00:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-    return `<span class="chart-column" title="${esc(date)}: ${number(success)} successful, ${number(failed)} failed"><i class="chart-bar" style="height:${successHeight}%"></i><i class="chart-bar failed" style="height:${failedHeight}%"></i></span>`;
+    return `<span class="chart-column" title="${esc(date)}: ${number(success)} successful, ${number(failed)} failed">${success ? `<i class="chart-bar" style="height:${successHeight}%"></i>` : ''}${failed ? `<i class="chart-bar failed" style="height:${failedHeight}%"></i>` : ''}</span>`;
   }).join('');
-  return `<div class="chart" role="img" aria-label="${esc(label)}">${columns}</div><div class="chart-legend"><span><i></i>Successful</span><span class="failed"><i></i>Failed</span></div>`;
+  return `<div class="chart" role="img" aria-label="${esc(label)}">${columns}</div><div class="chart-legend"><span><i></i>Successful</span>${hasFailures ? '<span class="failed"><i></i>Failed</span>' : ''}</div>`;
 }
 
 function rankedList(items, nameKey, valueKey, emptyText) {
@@ -61,12 +62,12 @@ function reportId(id) { return id ? ` id="${esc(id)}" tabindex="-1"` : ''; }
 function aggregateCard(report, wide = false, id = '') {
   if (!report?.total) return `<article${reportId(id)} class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>Authentication results reported by receiving email services.</p></div></div><p class="report-empty">No aggregate report data was found for this period.</p></article>`;
   const passed = Math.max(0, Number(report.total) - Number(report.failed || 0));
-  return `<article${reportId(id)} class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>${number(report.total)} messages observed over ${number(report.period_days)} days</p></div><span class="report-value">${report.pass_rate ?? '—'}%</span></div><div class="metric-row"><div class="metric"><strong>${number(report.failed)}</strong><span>Messages failing DMARC</span></div><div class="metric"><strong>${report.dkim_pass_rate ?? '—'}%</strong><span>DKIM aligned</span></div><div class="metric"><strong>${report.spf_pass_rate ?? '—'}%</strong><span>SPF aligned</span></div></div><p class="report-explanation">This is the number of messages that failed DMARC in aggregate reports. It is separate from optional, message-level RUF report files.</p>${trendChart((report.timeline || []).map(item => ({...item, passed: Math.max(0, item.total - item.failed)})), 'passed', 'failed', `Stacked DMARC daily results: ${number(passed)} successful and ${number(report.failed)} failed`)}</article>`;
+  return `<article${reportId(id)} class="report-card ${wide ? 'wide' : ''}"><div class="report-card-header"><div><h3>DMARC aggregate reports</h3><p>${number(report.total)} messages observed over ${number(report.period_days)} days</p></div><span class="report-value">${report.pass_rate ?? '—'}%</span></div><div class="alignment-table"><div class="alignment-heading"><span>Result</span><span>Messages</span><span>DKIM aligned</span><span>SPF aligned</span></div><div><strong>Failed DMARC</strong><span>${number(report.failed)}</span><span>${report.failed_dkim_aligned_rate ?? '—'}%</span><span>${report.failed_spf_aligned_rate ?? '—'}%</span></div><div><strong>Passed DMARC</strong><span>${number(report.passed ?? passed)}</span><span>${report.passed_dkim_aligned_rate ?? '—'}%</span><span>${report.passed_spf_aligned_rate ?? '—'}%</span></div></div><p class="report-explanation">Each alignment percentage uses only the messages in its row. DMARC passes when SPF or DKIM aligns, so the two percentages can overlap. The failed count is separate from optional, message-level RUF report files.</p>${trendChart((report.timeline || []).map(item => ({...item, passed: Math.max(0, item.total - item.failed)})), 'passed', 'failed', `Stacked DMARC daily results: ${number(passed)} successful and ${number(report.failed)} failed`)}</article>`;
 }
 
-function smtpTlsCard(report, id = '') {
-  if (!report?.available || (!report.successful && !report.failed)) return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>SMTP TLS reports</h3><p>Transport security results reported by sending services.</p></div></div><p class="report-empty">No SMTP TLS report data was found for this period.</p></article>`;
-  return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>SMTP TLS reports</h3><p>${number(report.reports)} reported policies</p></div><span class="report-value">${report.success_rate ?? '—'}%</span></div><div class="metric-row"><div class="metric"><strong>${number(report.successful)}</strong><span>Successful sessions</span></div><div class="metric"><strong>${number(report.failed)}</strong><span>Failed sessions</span></div><div class="metric"><strong>${number(report.failure_types?.length)}</strong><span>Failure types</span></div></div>${trendChart(report.timeline, 'successful', 'failed', `SMTP TLS daily results: ${number(report.successful)} successful and ${number(report.failed)} failed`)}</article>`;
+function smtpTlsCard(report, id = '', wide = false) {
+  if (!report?.available || (!report.successful && !report.failed)) return `<article${reportId(id)} class="report-card${wide ? ' wide' : ''}"><div class="report-card-header"><div><h3>SMTP TLS reports</h3><p>Transport security results reported by sending services.</p></div></div><p class="report-empty">No SMTP TLS report data was found for this period.</p></article>`;
+  return `<article${reportId(id)} class="report-card${wide ? ' wide' : ''}"><div class="report-card-header"><div><h3>SMTP TLS reports</h3><p>${number(report.reports)} reported policies</p></div><span class="report-value">${report.success_rate ?? '—'}%</span></div><div class="metric-row"><div class="metric"><strong>${number(report.successful)}</strong><span>Successful sessions</span></div><div class="metric"><strong>${number(report.failed)}</strong><span>Failed sessions</span></div><div class="metric"><strong>${number(report.failure_types?.length)}</strong><span>Failure types</span></div></div>${trendChart(report.timeline, 'successful', 'failed', `SMTP TLS daily results: ${number(report.successful)} successful and ${number(report.failed)} failed`)}</article>`;
 }
 
 function failureCard(report, id = '') {
@@ -76,12 +77,22 @@ function failureCard(report, id = '') {
   return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>Individual DMARC failure reports (RUF)</h3><p>Optional, message-level reports sent by some receiving providers</p></div><span class="report-value">${report?.available ? number(report.count) : '0'}</span></div><p class="report-explanation">${esc(explanation)} Aggregate reports above remain the authoritative count of messages that failed DMARC.</p><p class="privacy-note">${esc(report?.privacy_note || (report?.error ? 'No matching index is available yet.' : '') || 'Message samples are not displayed because they may contain personal or confidential content.')}</p></article>`;
 }
 
+function reporterList(items, valueKey, valueLabel, emptyText) {
+  if (!items?.length) return `<p class="report-empty">${esc(emptyText)}</p>`;
+  return `<ol class="reporter-list">${items.map(item => `<li><span><strong>${esc(item.name)}</strong>${item.domain ? `<small>${esc(item.domain)}</small>` : item.domains?.length ? `<small>${esc(item.domains.join(', '))}</small>` : '<small>Reporter domain not provided</small>'}</span><b>${number(item[valueKey])}<small>${esc(valueLabel)}</small></b></li>`).join('')}</ol>`;
+}
+
+function dmarcReportersCard(report, id = '') {
+  const limited = report?.reporter_sample_limited ? '<p class="privacy-note">The list is based on the 1,000 most recent matching OpenSearch documents.</p>' : '';
+  return `<article${reportId(id)} class="report-card wide"><div class="report-card-header"><div><h3>DMARC reports</h3><p>Receiving services and reporter domains that supplied aggregate reports</p></div></div>${reporterList(report?.reporters, 'reports', 'reports', 'No DMARC reporting services were found for this period.')}${limited}</article>`;
+}
+
 function reportingOrganizationsCard(report, id = '') {
   const organizations = report?.organizations || [];
   const samples = report?.raw_samples || [];
   const raw = samples.length || organizations.length ? `<details class="raw-data"><summary>Show reporter source fields</summary><p>These limited samples show the exact organization-related fields stored by parsedmarc. Message content and policy details are excluded.</p><pre>${esc(JSON.stringify({ normalized_organizations: organizations, source_samples: samples }, null, 2))}</pre></details>` : '';
   const missingName = organizations.some(item => item.name === 'Reporter name not provided');
-  return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>TLS reporting organizations</h3><p>Mail providers that sent TLS-RPT data about delivery attempts to your domain</p></div></div><p class="report-explanation">Each value is the number of reported SMTP delivery sessions, not messages. ${missingName ? '“Reporter name not provided” means the stored report did not contain a recognized organization-name field; open the source fields below to verify what parsedmarc saved.' : 'The source fields below let you verify the names parsedmarc stored.'}</p>${rankedList(organizations, 'name', 'sessions', 'No TLS reporting organizations were found.')}${raw}</article>`;
+  return `<article${reportId(id)} class="report-card"><div class="report-card-header"><div><h3>Top TLS reporting organizations</h3><p>Sending services and reporter domains that supplied TLS-RPT data</p></div></div><p class="report-explanation">Each value is the number of reported SMTP delivery sessions, not messages. ${missingName ? '“Reporter name not provided” means the stored report did not contain a recognized organization-name field; open the source fields below to verify what parsedmarc saved.' : 'The source fields below let you verify what parsedmarc stored.'}</p>${reporterList(organizations, 'sessions', 'sessions', 'No TLS reporting organizations were found.')}${raw}</article>`;
 }
 
 function smtpDiagnosticsCard(report, id = '') {
@@ -96,25 +107,26 @@ function smtpDiagnosticsCard(report, id = '') {
 }
 
 function detailCards(reports) {
-  return `${aggregateCard(reports?.aggregate, true, 'report-dmarc')} ${smtpTlsCard(reports?.smtp_tls, 'report-smtp-tls')} ${failureCard(reports?.failure, 'report-dmarc-failure')}${smtpDiagnosticsCard(reports?.smtp_diagnostics, 'report-smtp-diagnostics')}<article id="report-dmarc-sources" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>Top failing DMARC sources</h3><p>Source addresses producing the most failed messages, with reverse-DNS names when available</p></div></div>${sourceList(reports?.aggregate?.top_failing_sources)}</article><article id="report-smtp-tls-failures" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>SMTP TLS failure types</h3><p>Transport problems reported by sending services</p></div></div>${rankedList(reports?.smtp_tls?.failure_types, 'type', 'count', 'No SMTP TLS failure types were reported.')}</article>${reportingOrganizationsCard(reports?.smtp_tls, 'report-smtp-tls-organizations')}`;
+  return `${aggregateCard(reports?.aggregate, true, 'report-dmarc')}${smtpTlsCard(reports?.smtp_tls, 'report-smtp-tls', true)}<article id="report-dmarc-sources" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>Top failing DMARC sources</h3><p>Source addresses producing the most failed messages, with reverse-DNS names when available</p></div></div>${sourceList(reports?.aggregate?.top_failing_sources)}</article>${reportingOrganizationsCard(reports?.smtp_tls, 'report-smtp-tls-organizations')}${failureCard(reports?.failure, 'report-dmarc-failure')}<article id="report-smtp-tls-failures" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>SMTP TLS failure types</h3><p>Transport problems reported by sending services</p></div></div>${rankedList(reports?.smtp_tls?.failure_types, 'type', 'count', 'No SMTP TLS failure types were reported.')}</article>${dmarcReportersCard(reports?.aggregate, 'report-dmarc-reporters')}<div class="report-subheading wide"><small>Live service check</small><h3>SMTP server diagnostics</h3></div>${smtpDiagnosticsCard(reports?.smtp_diagnostics, 'report-smtp-diagnostics')}`;
 }
 
 function organizationReports(domains) {
-  const aggregate = { total: 0, failed: 0, period_days: 0, timeline: [], top_failing_sources: [] }; const smtp = { available: false, reports: 0, successful: 0, failed: 0, timeline: [], failure_types: [], organizations: [], raw_samples: [] }; let failures = 0; let failureAvailable = false;
-  const days = new Map(); const tlsDays = new Map(); const sources = new Map(); const types = new Map(); const organizations = new Map(); let dkimWeighted = 0; let spfWeighted = 0;
+  const aggregate = { total: 0, passed: 0, failed: 0, period_days: 0, timeline: [], top_failing_sources: [], reporters: [] }; const smtp = { available: false, reports: 0, successful: 0, failed: 0, timeline: [], failure_types: [], organizations: [], raw_samples: [] }; let failures = 0; let failureAvailable = false;
+  const days = new Map(); const tlsDays = new Map(); const sources = new Map(); const types = new Map(); const organizations = new Map(); const reporters = new Map(); let passedDkim = 0; let passedSpf = 0; let failedDkim = 0; let failedSpf = 0;
   for (const domain of domains) {
-    const a = domain.reports?.aggregate || {}; aggregate.total += Number(a.total || 0); aggregate.failed += Number(a.failed || 0); aggregate.period_days = Math.max(aggregate.period_days, Number(a.period_days || 0)); dkimWeighted += Number(a.dkim_pass_rate || 0) * Number(a.total || 0); spfWeighted += Number(a.spf_pass_rate || 0) * Number(a.total || 0);
+    const a = domain.reports?.aggregate || {}; const aPassed = Number(a.passed ?? Math.max(0, Number(a.total || 0) - Number(a.failed || 0))); const aFailed = Number(a.failed || 0); aggregate.total += Number(a.total || 0); aggregate.passed += aPassed; aggregate.failed += aFailed; aggregate.period_days = Math.max(aggregate.period_days, Number(a.period_days || 0)); passedDkim += Number(a.passed_dkim_aligned_rate || 0) * aPassed; passedSpf += Number(a.passed_spf_aligned_rate || 0) * aPassed; failedDkim += Number(a.failed_dkim_aligned_rate || 0) * aFailed; failedSpf += Number(a.failed_spf_aligned_rate || 0) * aFailed;
     for (const point of a.timeline || []) { const key = String(point.date).slice(0,10); const day = days.get(key) || {date:key,total:0,failed:0}; day.total += Number(point.total || 0); day.failed += Number(point.failed || 0); days.set(key,day); }
     for (const item of a.top_failing_sources || []) { const current = sources.get(item.ip) || { ...item, messages: 0 }; current.messages += Number(item.messages || 0); if (!current.fqdn && item.fqdn) current.fqdn = item.fqdn; if (!current.network_owner && item.network_owner) current.network_owner = item.network_owner; sources.set(item.ip, current); }
+    for (const item of a.reporters || []) { const key = `${item.name}|${item.domain || ''}`; const current = reporters.get(key) || { ...item, reports: 0, messages: 0 }; current.reports += Number(item.reports || 0); current.messages += Number(item.messages || 0); if (item.last_report && (!current.last_report || item.last_report > current.last_report)) current.last_report = item.last_report; reporters.set(key, current); }
     const t = domain.reports?.smtp_tls || {}; if (t.available) smtp.available = true; smtp.reports += Number(t.reports || 0); smtp.successful += Number(t.successful || 0); smtp.failed += Number(t.failed || 0);
     for (const point of t.timeline || []) { const key = String(point.date).slice(0,10); const day = tlsDays.get(key) || {date:key,successful:0,failed:0}; day.successful += Number(point.successful || 0); day.failed += Number(point.failed || 0); tlsDays.set(key,day); }
     for (const item of t.failure_types || []) types.set(item.type, (types.get(item.type) || 0) + Number(item.count || 0));
-    for (const item of t.organizations || []) organizations.set(item.name, (organizations.get(item.name) || 0) + Number(item.sessions || 0));
+    for (const item of t.organizations || []) { const current = organizations.get(item.name) || { name: item.name, sessions: 0, reports: 0, domains: new Set() }; current.sessions += Number(item.sessions || 0); current.reports += Number(item.reports || 0); for (const value of item.domains || []) current.domains.add(value); organizations.set(item.name, current); }
     for (const sample of t.raw_samples || []) if (smtp.raw_samples.length < 20) smtp.raw_samples.push({ domain: domain.domain, ...sample });
     const f = domain.reports?.failure || {}; if (f.available) failureAvailable = true; failures += Number(f.count || 0);
   }
-  aggregate.pass_rate = aggregate.total ? Math.round((aggregate.total - aggregate.failed) / aggregate.total * 1000) / 10 : null; aggregate.dkim_pass_rate = aggregate.total ? Math.round(dkimWeighted / aggregate.total * 10) / 10 : null; aggregate.spf_pass_rate = aggregate.total ? Math.round(spfWeighted / aggregate.total * 10) / 10 : null; aggregate.timeline = [...days.values()].sort((a,b)=>a.date.localeCompare(b.date)); aggregate.top_failing_sources = [...sources.values()].sort((a,b)=>b.messages-a.messages).slice(0,8);
-  const tlsTotal = smtp.successful + smtp.failed; smtp.success_rate = tlsTotal ? Math.round(smtp.successful / tlsTotal * 1000) / 10 : null; smtp.timeline = [...tlsDays.values()].sort((a,b)=>a.date.localeCompare(b.date)); smtp.failure_types = [...types].map(([type,count])=>({type,count})).sort((a,b)=>b.count-a.count).slice(0,8); smtp.organizations = [...organizations].map(([name,sessions])=>({name,sessions})).sort((a,b)=>b.sessions-a.sessions).slice(0,8);
+  aggregate.pass_rate = aggregate.total ? Math.round(aggregate.passed / aggregate.total * 1000) / 10 : null; aggregate.passed_dkim_aligned_rate = aggregate.passed ? Math.round(passedDkim / aggregate.passed * 10) / 10 : null; aggregate.passed_spf_aligned_rate = aggregate.passed ? Math.round(passedSpf / aggregate.passed * 10) / 10 : null; aggregate.failed_dkim_aligned_rate = aggregate.failed ? Math.round(failedDkim / aggregate.failed * 10) / 10 : null; aggregate.failed_spf_aligned_rate = aggregate.failed ? Math.round(failedSpf / aggregate.failed * 10) / 10 : null; aggregate.timeline = [...days.values()].sort((a,b)=>a.date.localeCompare(b.date)); aggregate.top_failing_sources = [...sources.values()].sort((a,b)=>b.messages-a.messages).slice(0,8); aggregate.reporters = [...reporters.values()].sort((a,b)=>b.messages-a.messages);
+  const tlsTotal = smtp.successful + smtp.failed; smtp.success_rate = tlsTotal ? Math.round(smtp.successful / tlsTotal * 1000) / 10 : null; smtp.timeline = [...tlsDays.values()].sort((a,b)=>a.date.localeCompare(b.date)); smtp.failure_types = [...types].map(([type,count])=>({type,count})).sort((a,b)=>b.count-a.count).slice(0,8); smtp.organizations = [...organizations.values()].map(item=>({...item,domains:[...item.domains]})).sort((a,b)=>b.sessions-a.sessions).slice(0,8);
   return { aggregate, smtp_tls: smtp, failure: { available: failureAvailable, count: failures, privacy_note: 'Counts only. Message samples remain private.' } };
 }
 
@@ -162,7 +174,7 @@ function renderDashboard() {
     return `<section class="attention-group"><div class="attention-group-heading"><h3>${esc(domain.domain)}</h3><button data-open-domain="${domainIndex}">View domain →</button></div>${issues.map(check => `<article class="issue ${check.status}"><span class="issue-status">${statusSymbol(check.status)}</span><span class="control">${esc(check.label)}</span><div><h3>${esc(check.summary)}</h3><p>${esc(check.action)}</p></div><button class="view" data-dashboard-check="${esc(check.id)}" data-domain-index="${domainIndex}">View →</button></article>`).join('')}</section>`;
   }).join('') : '<div class="clear">No immediate actions. Every configured control passed its threshold.</div>';
   const reports = organizationReports(data.domains);
-  $('#organization-reports').innerHTML = `${aggregateCard(reports.aggregate)}${smtpTlsCard(reports.smtp_tls)}${failureCard(reports.failure)}${reportingOrganizationsCard(reports.smtp_tls)}`;
+  $('#organization-reports').innerHTML = `${aggregateCard(reports.aggregate)}${smtpTlsCard(reports.smtp_tls)}${dmarcReportersCard(reports.aggregate)}${failureCard(reports.failure)}${reportingOrganizationsCard(reports.smtp_tls)}`;
 }
 
 function renderDomain() {
@@ -327,7 +339,7 @@ function detail(id) {
 }
 
 function reportDestination(check) {
-  if (check.id === 'dmarc_reports' || check.id === 'dmarc' || check.id === 'dkim') return { id: 'report-dmarc', label: 'View DMARC reports' };
+  if (check.id === 'dmarc_reports' || check.id === 'dmarc' || check.id === 'spf' || check.id === 'dkim') return { id: 'report-dmarc', label: 'View DMARC reports' };
   if (check.id === 'smtp_service') return { id: 'report-smtp-diagnostics', label: 'View SMTP diagnostics' };
   if (check.id === 'tls_rpt' || check.id === 'mta_sts' || check.id.startsWith('tls_')) return { id: 'report-smtp-tls', label: 'View SMTP TLS reports' };
   return { id: 'report-center', label: 'View domain reports' };
@@ -350,15 +362,10 @@ function renderSettingsDomains() {
   $('#settings-domain-list').innerHTML = settings.monitored_domains.length ? settings.monitored_domains.map((domain, index) => {
     const selectors = settings.dkim_selectors[domain] || [];
     const endpoints = settings.tls_endpoints[domain] || [];
-    const exception = settings.bimi_exceptions?.[domain];
-    const expires = exception?.mode === 'until' ? new Date(exception.expires_at) : null;
-    const bimiNote = exception?.mode === 'permanent'
-      ? ' · BIMI review ignored permanently'
-      : expires instanceof Date && Number.isFinite(expires.valueOf()) && expires > new Date()
-        ? ` · BIMI review ignored until ${expires.toLocaleDateString()}`
-        : expires instanceof Date && Number.isFinite(expires.valueOf())
-          ? ` · BIMI review exception expired ${expires.toLocaleDateString()}`
-          : '';
+    const configured = settings.bimi_exceptions?.[domain] || {};
+    const exceptions = [configured.self_asserted || (configured.mode ? configured : null), configured.no_logo].filter(value => value?.mode);
+    const active = exceptions.filter(value => value.mode === 'permanent' || (value.mode === 'until' && new Date(value.expires_at) > new Date()));
+    const bimiNote = active.length ? ` · ${active.length} BIMI review exception${active.length === 1 ? '' : 's'}` : '';
     return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} TLS certificate${endpoints.length === 1 ? '' : 's'}${esc(bimiNote)}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
   }).join('') : '<div class="empty-list"><p>No domains are configured.</p><button type="button" data-add-domain>Add a domain</button></div>';
 }
@@ -464,17 +471,15 @@ function renderEditorLists() {
 
 function openDomainEditor(index = null) {
   const domain = index === null ? '' : state.settings.monitored_domains[index];
-  const bimiException = clone(state.settings.bimi_exceptions?.[domain] || null);
-  const expiration = bimiException?.mode === 'until' ? new Date(bimiException.expires_at) : null;
-  const activeBimiException = bimiException?.mode === 'permanent' || (expiration instanceof Date && Number.isFinite(expiration.valueOf()) && expiration > new Date());
-  const remainingMonths = activeBimiException && bimiException?.mode === 'until' ? Math.max(1, Math.ceil((expiration - Date.now()) / 2629800000)) : 6;
+  const configured = clone(state.settings.bimi_exceptions?.[domain] || {});
+  const exceptions = { self_asserted: configured.self_asserted || (configured.mode ? configured : null), no_logo: configured.no_logo || null };
   state.editor = {
     index,
     originalDomain: domain,
     selectors: clone(state.settings.dkim_selectors[domain] || []),
     endpoints: clone(state.settings.tls_endpoints[domain] || []),
-    bimiExceptionOriginal: bimiException,
-    bimiExceptionDirty: false,
+    bimiExceptionsOriginal: exceptions,
+    bimiExceptionDirty: { self_asserted: false, no_logo: false },
     editingSelector: null,
     editingEndpoint: null
   };
@@ -485,24 +490,41 @@ function openDomainEditor(index = null) {
   $('#endpoint-host').value = '';
   $('#endpoint-port').value = '443';
   $('#endpoint-add').textContent = '＋';
-  $('#bimi-ignore-mode').value = activeBimiException && bimiException?.mode === 'permanent' ? 'permanent' : activeBimiException && bimiException?.mode === 'until' ? 'temporary' : 'none';
-  $('#bimi-ignore-months').value = remainingMonths;
+  setBimiExceptionFields('self_asserted', '#bimi-ignore-mode', '#bimi-ignore-months');
+  setBimiExceptionFields('no_logo', '#bimi-no-logo-ignore-mode', '#bimi-no-logo-ignore-months');
   $('#domain-message').textContent = '';
   renderEditorLists();
   updateBimiIgnoreVisibility();
   $('#domain-dialog').showModal();
 }
 
+function setBimiExceptionFields(kind, modeSelector, monthsSelector) {
+  const exception = state.editor.bimiExceptionsOriginal[kind];
+  const expiration = exception?.mode === 'until' ? new Date(exception.expires_at) : null;
+  const active = exception?.mode === 'permanent' || (expiration instanceof Date && Number.isFinite(expiration.valueOf()) && expiration > new Date());
+  $(modeSelector).value = active && exception.mode === 'permanent' ? 'permanent' : active && exception.mode === 'until' ? 'temporary' : 'none';
+  $(monthsSelector).value = active && exception?.mode === 'until' ? Math.max(1, Math.ceil((expiration - Date.now()) / 2629800000)) : 6;
+}
+
 function updateBimiIgnoreVisibility() {
-  const temporary = $('#bimi-ignore-mode').value === 'temporary';
-  $('#bimi-ignore-months-field').hidden = !temporary;
-  const original = state.editor?.bimiExceptionOriginal;
-  const note = $('#bimi-ignore-expiration');
-  if (!temporary) note.textContent = '';
-  else if (!state.editor?.bimiExceptionDirty && original?.mode === 'until') {
-    const expires = new Date(original.expires_at);
-    note.textContent = expires > new Date() ? `Current exception expires ${expires.toLocaleDateString()}.` : `The previous exception expired ${expires.toLocaleDateString()}. Saving renews it.`;
-  } else note.textContent = 'The exception period begins when Settings are saved.';
+  for (const item of [{ kind: 'self_asserted', mode: '#bimi-ignore-mode', field: '#bimi-ignore-months-field', note: '#bimi-ignore-expiration' }, { kind: 'no_logo', mode: '#bimi-no-logo-ignore-mode', field: '#bimi-no-logo-ignore-months-field', note: '#bimi-no-logo-ignore-expiration' }]) {
+    const temporary = $(item.mode).value === 'temporary'; $(item.field).hidden = !temporary;
+    const original = state.editor?.bimiExceptionsOriginal?.[item.kind]; const note = $(item.note);
+    if (!temporary) note.textContent = '';
+    else if (!state.editor?.bimiExceptionDirty?.[item.kind] && original?.mode === 'until') { const expires = new Date(original.expires_at); note.textContent = expires > new Date() ? `Current exception expires ${expires.toLocaleDateString()}.` : `The previous exception expired ${expires.toLocaleDateString()}. Saving renews it.`; }
+    else note.textContent = 'The exception period begins when Settings are saved.';
+  }
+}
+
+function bimiExceptionFromFields(kind, modeSelector, monthsSelector) {
+  const mode = $(modeSelector).value;
+  if (mode === 'none') return null;
+  if (mode === 'permanent') return { mode: 'permanent' };
+  const months = Number($(monthsSelector).value);
+  if (!Number.isInteger(months) || months < 1 || months > 120) throw new Error('Enter each BIMI exception period as a number between 1 and 120 months.');
+  const original = state.editor.bimiExceptionsOriginal[kind];
+  if (!state.editor.bimiExceptionDirty[kind] && original?.mode === 'until') return clone(original);
+  const expires = new Date(); expires.setUTCMonth(expires.getUTCMonth() + months); return { mode: 'until', expires_at: expires.toISOString() };
 }
 
 function addSelector() {
@@ -546,15 +568,9 @@ function saveDomain(event) {
   if (!valid) return showDomainError('Enter a valid domain name.');
   const duplicate = state.settings.monitored_domains.findIndex((value, index) => value === domain && index !== state.editor.index);
   if (duplicate >= 0) return showDomainError('That domain is already monitored.');
-  const ignoreMode = $('#bimi-ignore-mode').value;
-  let bimiException = null;
-  if (ignoreMode === 'permanent') bimiException = { mode: 'permanent' };
-  else if (ignoreMode === 'temporary') {
-    const months = Number($('#bimi-ignore-months').value);
-    if (!Number.isInteger(months) || months < 1 || months > 120) return showDomainError('Enter a BIMI exception period between 1 and 120 months.');
-    if (!state.editor.bimiExceptionDirty && state.editor.bimiExceptionOriginal?.mode === 'until') bimiException = clone(state.editor.bimiExceptionOriginal);
-    else { const expires = new Date(); expires.setUTCMonth(expires.getUTCMonth() + months); bimiException = { mode: 'until', expires_at: expires.toISOString() }; }
-  }
+  let selfAssertedException; let noLogoException;
+  try { selfAssertedException = bimiExceptionFromFields('self_asserted', '#bimi-ignore-mode', '#bimi-ignore-months'); noLogoException = bimiExceptionFromFields('no_logo', '#bimi-no-logo-ignore-mode', '#bimi-no-logo-ignore-months'); }
+  catch (error) { return showDomainError(error.message); }
   const oldDomain = state.editor.originalDomain;
   if (state.editor.index === null) state.settings.monitored_domains.push(domain);
   else state.settings.monitored_domains[state.editor.index] = domain;
@@ -566,7 +582,7 @@ function saveDomain(event) {
   state.settings.dkim_selectors[domain] = clone(state.editor.selectors);
   state.settings.tls_endpoints[domain] = clone(state.editor.endpoints);
   state.settings.bimi_exceptions ||= {};
-  if (bimiException) state.settings.bimi_exceptions[domain] = bimiException;
+  if (selfAssertedException || noLogoException) state.settings.bimi_exceptions[domain] = { ...(selfAssertedException ? { self_asserted: selfAssertedException } : {}), ...(noLogoException ? { no_logo: noLogoException } : {}) };
   else delete state.settings.bimi_exceptions[domain];
   $('#domain-dialog').close();
   renderSettingsDomains();
@@ -734,8 +750,10 @@ $('#report-source').onchange = updateSettingsVisibility;
 $('#mailbox-enabled').onchange = updateSettingsVisibility;
 $('#snapshots-enabled').onchange = updateSettingsVisibility;
 $('#archive-folder').oninput = updateSettingsVisibility;
-$('#bimi-ignore-mode').onchange = () => { state.editor.bimiExceptionDirty = true; updateBimiIgnoreVisibility(); };
-$('#bimi-ignore-months').oninput = () => { state.editor.bimiExceptionDirty = true; updateBimiIgnoreVisibility(); };
+$('#bimi-ignore-mode').onchange = () => { state.editor.bimiExceptionDirty.self_asserted = true; updateBimiIgnoreVisibility(); };
+$('#bimi-ignore-months').oninput = () => { state.editor.bimiExceptionDirty.self_asserted = true; updateBimiIgnoreVisibility(); };
+$('#bimi-no-logo-ignore-mode').onchange = () => { state.editor.bimiExceptionDirty.no_logo = true; updateBimiIgnoreVisibility(); };
+$('#bimi-no-logo-ignore-months').oninput = () => { state.editor.bimiExceptionDirty.no_logo = true; updateBimiIgnoreVisibility(); };
 $('#log-service').onchange = renderSystemLogs;
 $('#service-log-service').onchange = loadServiceLogs;
 $('#refresh-service-log').onclick = loadServiceLogs;

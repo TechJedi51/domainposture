@@ -9,6 +9,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { version: PACKAGE_VERSION } = require('./package.json');
 const { smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validHostname: validSmtpHostname, timingTest: smtpTimingTest } = require('./smtp');
+const { spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp } = require('./dns-security');
 
 const PORT = Number(process.env.PORT || 8080);
 const APP_VERSION = process.env.APP_VERSION || PACKAGE_VERSION;
@@ -186,19 +187,23 @@ function validCron(value) {
 
 function normalizeBimiExceptions(input = {}, monitoredDomains = []) {
   const output = {};
+  const normalizedException = (rawException, domain, label) => {
+    const exception = rawException || {};
+    if (exception.mode === 'permanent') return { mode: 'permanent' };
+    if (exception.mode === 'until') {
+      const timestamp = Date.parse(exception.expires_at);
+      if (!Number.isFinite(timestamp)) throw new Error(`Invalid BIMI ${label} exception expiration for ${domain}`);
+      return { mode: 'until', expires_at: new Date(timestamp).toISOString() };
+    }
+    return null;
+  };
   for (const [rawDomain, rawException] of Object.entries(input || {})) {
     const domain = String(rawDomain).trim().toLowerCase().replace(/\.$/, '');
     if (!validDomain(domain) || !monitoredDomains.includes(domain)) continue;
     const exception = rawException || {};
-    if (exception.mode === 'permanent') {
-      output[domain] = { mode: 'permanent' };
-      continue;
-    }
-    if (exception.mode === 'until') {
-      const timestamp = Date.parse(exception.expires_at);
-      if (!Number.isFinite(timestamp)) throw new Error(`Invalid BIMI exception expiration for ${domain}`);
-      output[domain] = { mode: 'until', expires_at: new Date(timestamp).toISOString() };
-    }
+    const selfAsserted = normalizedException(exception.self_asserted || (exception.mode ? exception : null), domain, 'self-asserted logo');
+    const noLogo = normalizedException(exception.no_logo, domain, 'missing logo');
+    if (selfAsserted || noLogo) output[domain] = { ...(selfAsserted ? { self_asserted: selfAsserted } : {}), ...(noLogo ? { no_logo: noLogo } : {}) };
   }
   return output;
 }
@@ -251,7 +256,7 @@ function normalizeSettings(input = {}) {
   const snapshotMax = boundedNumber(input.snapshots?.max_count, 60, 1, 10000, 'Maximum snapshots');
   if (snapshotMin > snapshotMax) throw new Error('Minimum snapshots cannot exceed maximum snapshots');
   return {
-    schema_version: 4,
+    schema_version: 5,
     monitored_domains: domains,
     dkim_selectors: selectors,
     tls_endpoints: endpoints,
@@ -687,28 +692,37 @@ async function mtaSts(domain) {
   } catch (error) { return result('mta_sts', 'MTA-STS', 'critical', 'Check failed', error.message, 'Verify DNS, HTTPS, and the policy endpoint.', evidence); }
 }
 
-async function tlsRpt(domain) {
-  try { const found = protocol(await txt(`_smtp._tls.${domain}`), 'v=TLSRPTv1'); if (found.length === 1 && tags(found[0]).rua) return result('tls_rpt', 'TLS reporting', 'healthy', 'Reports enabled', 'SMTP TLS failures have a report destination.', 'Review TLS reports before policy changes.', { record: found[0] }); }
-  catch (_) {}
-  return result('tls_rpt', 'TLS reporting', 'warning', 'Reports unavailable', 'No valid TLSRPTv1 record with rua was found.', 'Publish a TLS-RPT record so delivery failures are observable.');
-}
-
-async function bimi(domain, dmarcResult, configuredException = null) {
+async function bimi(domain, dmarcResult, configuredException = null, options = {}) {
   bimiLogos.delete(domain);
+  const resolveTxt = options.txt || txt; const fetchResource = options.get || get;
+  const selfAssertedException = configuredException?.self_asserted || (configuredException?.mode ? configuredException : null);
+  const noLogoException = configuredException?.no_logo || null;
+  const ignoredNoLogo = activeBimiException(noLogoException);
+  const ignoredResult = detail => result('bimi', 'BIMI', 'ignored', 'No logo · Ignored', `${detail} This review item is ignored ${ignoredNoLogo.label}.`, 'No action is required while this exception remains active. Edit the domain to change or remove it.', { ignored: true, ignore_reason: 'no_logo', ignore_mode: ignoredNoLogo.mode, ignored_until: ignoredNoLogo.expires_at || null, original_status: 'warning' });
   try {
-    const found = protocol(await txt(`default._bimi.${domain}`), 'v=BIMI1');
-    if (found.length !== 1) return result('bimi', 'BIMI', 'warning', 'Not configured', 'Expected exactly one BIMI1 record.', 'Publish BIMI after DMARC enforcement and a compliant logo are ready.');
+    const found = protocol(await resolveTxt(`default._bimi.${domain}`), 'v=BIMI1');
+    if (found.length !== 1) {
+      if (!found.length && ignoredNoLogo.active) return ignoredResult('No BIMI1 record or logo is published.');
+      return result('bimi', 'BIMI', found.length ? 'critical' : 'warning', found.length ? 'Multiple records' : 'Not configured', 'Expected exactly one BIMI1 record.', 'Publish exactly one BIMI record after DMARC enforcement and a compliant logo are ready.');
+    }
     const parsed = tags(found[0]); const dm = dmarcResult.evidence.tags || {}; const enforced = ['quarantine', 'reject'].includes((dm.p || '').toLowerCase()) && Number(dm.pct || 100) === 100;
     if (!enforced) return result('bimi', 'BIMI', 'critical', 'DMARC prerequisite not met', 'BIMI requires enforcement applied to all mail.', 'Enforce DMARC before troubleshooting BIMI.', { record: found[0] });
-    if (!parsed.l?.startsWith('https://')) return result('bimi', 'BIMI', 'critical', 'Logo URL missing', 'The l tag must contain an HTTPS SVG URL.', 'Publish a compliant SVG Tiny P/S logo.', { record: found[0] });
-    const logo = await get(parsed.l, 2097152); const safeSvg = logo.status === 200 && /<svg\b/i.test(logo.body) && !/<script\b|javascript:|<foreignObject\b/i.test(logo.body);
+    if (!parsed.l) {
+      if (ignoredNoLogo.active) return ignoredResult('The BIMI record does not publish a logo URL.');
+      return result('bimi', 'BIMI', 'warning', 'Logo URL missing', 'The l tag does not publish an SVG logo URL.', 'Publish a compliant SVG Tiny P/S logo, or ignore the intentionally absent logo in domain settings.', { record: found[0] });
+    }
+    if (!parsed.l.startsWith('https://')) return result('bimi', 'BIMI', 'critical', 'Invalid logo URL', 'The l tag must contain an HTTPS SVG URL.', 'Publish the logo from a valid HTTPS URL.', { record: found[0] });
+    const logo = await fetchResource(parsed.l, 2097152); const safeSvg = logo.status === 200 && /<svg\b/i.test(logo.body) && !/<script\b|javascript:|<foreignObject\b/i.test(logo.body);
     if (!safeSvg) return result('bimi', 'BIMI', 'critical', 'Logo cannot be validated', `Logo endpoint returned HTTP ${logo.status}.`, 'Serve a safe, compliant SVG directly over HTTPS.', { record: found[0], logo_status: logo.status });
     bimiLogos.set(domain, { body: logo.body, etag: crypto.createHash('sha256').update(logo.body).digest('hex') });
     if (parsed.a) return result('bimi', 'BIMI', 'healthy', 'Logo and certificate published', 'Record, logo, and evidence URL are present.', 'Recheck after changes.', { record: found[0], tags: parsed, logo_available: true });
-    const ignored = activeBimiException(configuredException);
+    const ignored = activeBimiException(selfAssertedException);
     if (ignored.active) return result('bimi', 'BIMI', 'ignored', 'Self-asserted logo · Ignored', `No VMC/CMC evidence URL is published. This review item is ignored ${ignored.label}.`, 'No action is required while this exception remains active. Edit the domain to change or remove it.', { record: found[0], tags: parsed, logo_available: true, ignored: true, ignore_mode: ignored.mode, ignored_until: ignored.expires_at || null, original_status: 'warning' });
     return result('bimi', 'BIMI', 'warning', 'Self-asserted logo', 'No VMC/CMC evidence URL is published.', 'Consider a VMC or CMC for broader support, or ignore this review item in the domain settings.', { record: found[0], tags: parsed, logo_available: true });
-  } catch (error) { return result('bimi', 'BIMI', 'warning', 'Not configured', error.message, 'Publish BIMI after DMARC enforcement is ready.'); }
+  } catch (error) {
+    if (ignoredNoLogo.active && ['ENOTFOUND', 'ENODATA', 'EAI_NONAME'].includes(error.code)) return ignoredResult('No BIMI1 record or logo is published.');
+    return result('bimi', 'BIMI', 'warning', 'Not configured', error.message, 'Publish BIMI after DMARC enforcement is ready, or ignore an intentionally absent logo in domain settings.');
+  }
 }
 
 function certificate(endpoint) {
@@ -798,13 +812,45 @@ async function sourceAggregationField(config) {
   return sourceFieldCache.get(key);
 }
 
+function contactDomain(value) {
+  const candidate = Array.isArray(value) ? value[0] : value;
+  if (!candidate) return null;
+  const text = String(candidate).trim();
+  try {
+    const parsed = new URL(text);
+    if (parsed.hostname) return parsed.hostname.toLowerCase();
+    if (parsed.protocol === 'mailto:') return decodeURIComponent(parsed.pathname).split('@').pop().toLowerCase() || null;
+  } catch (_) {}
+  const match = text.match(/@([^>\s,;?]+)(?:\?.*)?$/);
+  return match ? match[1].toLowerCase().replace(/\.$/, '') : null;
+}
+
+function summarizeDmarcReporters(hits = []) {
+  const reporters = new Map();
+  for (const hit of hits) {
+    const source = hit._source || hit;
+    const name = String(source.org_name || source.organization_name || 'Reporter name not provided').trim();
+    const domain = contactDomain(source.org_email) || contactDomain(source.org_extra_contact_info);
+    const key = `${name.toLowerCase()}|${domain || ''}`;
+    const reporter = reporters.get(key) || { name, domain, reports: new Set(), messages: 0, last_report: null };
+    if (source.report_id) reporter.reports.add(String(source.report_id));
+    else if (source.date_begin || source.date_end) reporter.reports.add(`${source.date_begin || ''}|${source.date_end || ''}`);
+    reporter.messages += Number(source.message_count || 0);
+    const date = source.date_end || source.date_begin;
+    if (date && (!reporter.last_report || String(date) > reporter.last_report)) reporter.last_report = String(date);
+    reporters.set(key, reporter);
+  }
+  return [...reporters.values()].map(item => ({ ...item, reports: item.reports.size || 1 })).sort((a, b) => b.messages - a.messages || a.name.localeCompare(b.name));
+}
+
 async function reports(domain, config, days) {
   if (!config.enabled) return result('dmarc_reports', 'DMARC reports', 'info', 'OpenSearch disabled', 'DNS posture is monitored, but parsedmarc aggregate results are not connected.', 'Enable OpenSearch in Settings and supply the connection variables to add observed authentication results.');
   try {
     const sourceField = await sourceAggregationField(config);
-    const failedAggregations = { total: { sum: { field: 'message_count' } } };
+    const alignmentAggregations = { dkim_aligned: { filter: { term: { dkim_aligned: true } }, aggs: { total: { sum: { field: 'message_count' } } } }, spf_aligned: { filter: { term: { spf_aligned: true } }, aggs: { total: { sum: { field: 'message_count' } } } } };
+    const failedAggregations = { total: { sum: { field: 'message_count' } }, ...alignmentAggregations };
     if (sourceField) failedAggregations.sources = { terms: { field: sourceField, size: 5 }, aggs: { messages: { sum: { field: 'message_count' } }, identity: { top_hits: { size: 1, _source: ['source_reverse_dns', 'source_name', 'source_base_domain', 'source_as_name', 'source_as_domain', 'source_as_description'] } } } };
-    const data = await osRequest(config, '_search', 'POST', { size: 0, query: { bool: { must: [{ range: { date_begin: { gte: `now-${days}d` } } }, { match_phrase: { header_from: domain } }] } }, aggs: { total: { sum: { field: 'message_count' } }, passed: { filter: { term: { passed_dmarc: true } }, aggs: { total: { sum: { field: 'message_count' } } } }, dkim_passed: { filter: { term: { passed_dkim: true } }, aggs: { total: { sum: { field: 'message_count' } } } }, spf_passed: { filter: { term: { passed_spf: true } }, aggs: { total: { sum: { field: 'message_count' } } } }, failed: { filter: { term: { passed_dmarc: false } }, aggs: failedAggregations }, timeline: { date_histogram: { field: 'date_begin', calendar_interval: 'day', min_doc_count: 0 }, aggs: { total: { sum: { field: 'message_count' } }, failed: { filter: { term: { passed_dmarc: false } }, aggs: { total: { sum: { field: 'message_count' } } } } } } } });
+    const data = await osRequest(config, '_search', 'POST', { size: 1000, track_total_hits: true, sort: [{ date_begin: 'desc' }], _source: ['org_name', 'organization_name', 'org_email', 'org_extra_contact_info', 'report_id', 'date_begin', 'date_end', 'message_count'], query: { bool: { must: [{ range: { date_begin: { gte: `now-${days}d` } } }, { match_phrase: { header_from: domain } }] } }, aggs: { total: { sum: { field: 'message_count' } }, passed: { filter: { term: { passed_dmarc: true } }, aggs: { total: { sum: { field: 'message_count' } }, ...alignmentAggregations } }, failed: { filter: { term: { passed_dmarc: false } }, aggs: failedAggregations }, timeline: { date_histogram: { field: 'date_begin', calendar_interval: 'day', min_doc_count: 0 }, aggs: { total: { sum: { field: 'message_count' } }, failed: { filter: { term: { passed_dmarc: false } }, aggs: { total: { sum: { field: 'message_count' } } } } } } } });
     const total = data.aggregations?.total?.value || 0; const passed = data.aggregations?.passed?.total?.value || 0; const failed = data.aggregations?.failed?.total?.value || 0; const rate = total ? Math.round(passed / total * 1000) / 10 : null;
     const sources = await Promise.all((data.aggregations?.failed?.sources?.buckets || []).map(async bucket => {
       const identity = bucket.identity?.hits?.hits?.[0]?._source || {};
@@ -816,8 +862,11 @@ async function reports(domain, config, days) {
     const status = !total ? 'warning' : rate < 90 ? 'critical' : rate < 98 ? 'warning' : 'healthy';
     const mappingNote = sourceField ? '' : ' Source-IP ranking is unavailable because the field is not aggregatable in these indices.';
     const timeline = (data.aggregations?.timeline?.buckets || []).map(bucket => ({ date: bucket.key_as_string, total: Math.round(bucket.total?.value || 0), failed: Math.round(bucket.failed?.total?.value || 0) }));
-    const dkimPassed = data.aggregations?.dkim_passed?.total?.value || 0; const spfPassed = data.aggregations?.spf_passed?.total?.value || 0;
-    return result('dmarc_reports', 'DMARC reports', status, total ? `${rate}% aligned` : 'No recent reports', (total ? `${Math.round(failed)} of ${Math.round(total)} messages failed in ${days} days.` : 'No matching aggregate reports were found.') + mappingNote, total && status !== 'healthy' ? (sourceField ? 'Review top failing sources and align legitimate senders.' : 'Review failing records in parsedmarc and align legitimate senders.') : 'Watch for new failing sources.', { period_days: days, total: Math.round(total), passed: Math.round(passed), failed: Math.round(failed), pass_rate: rate, dkim_pass_rate: total ? Math.round(dkimPassed / total * 1000) / 10 : null, spf_pass_rate: total ? Math.round(spfPassed / total * 1000) / 10 : null, source_field: sourceField, top_failing_sources: sources, timeline });
+    const passedDkim = data.aggregations?.passed?.dkim_aligned?.total?.value || 0; const passedSpf = data.aggregations?.passed?.spf_aligned?.total?.value || 0;
+    const failedDkim = data.aggregations?.failed?.dkim_aligned?.total?.value || 0; const failedSpf = data.aggregations?.failed?.spf_aligned?.total?.value || 0;
+    const alignedDkim = passedDkim + failedDkim; const alignedSpf = passedSpf + failedSpf;
+    const totalHits = typeof data.hits?.total === 'object' ? Number(data.hits.total.value || 0) : Number(data.hits?.total || 0);
+    return result('dmarc_reports', 'DMARC reports', status, total ? `${rate}% aligned` : 'No recent reports', (total ? `${Math.round(failed)} of ${Math.round(total)} messages failed in ${days} days.` : 'No matching aggregate reports were found.') + mappingNote, total && status !== 'healthy' ? (sourceField ? 'Review top failing sources and align legitimate senders.' : 'Review failing records in parsedmarc and align legitimate senders.') : 'Watch for new failing sources.', { period_days: days, total: Math.round(total), passed: Math.round(passed), failed: Math.round(failed), pass_rate: rate, dkim_pass_rate: total ? Math.round(alignedDkim / total * 1000) / 10 : null, spf_pass_rate: total ? Math.round(alignedSpf / total * 1000) / 10 : null, passed_dkim_aligned_rate: passed ? Math.round(passedDkim / passed * 1000) / 10 : null, passed_spf_aligned_rate: passed ? Math.round(passedSpf / passed * 1000) / 10 : null, failed_dkim_aligned_rate: failed ? Math.round(failedDkim / failed * 1000) / 10 : null, failed_spf_aligned_rate: failed ? Math.round(failedSpf / failed * 1000) / 10 : null, reporters: summarizeDmarcReporters(data.hits?.hits || []), reporter_sample_limited: totalHits > 1000, source_field: sourceField, top_failing_sources: sources, timeline });
   } catch (error) { return result('dmarc_reports', 'DMARC reports', 'warning', 'OpenSearch query failed', error.message, 'Verify the OpenSearch environment variables and parsedmarc index.'); }
 }
 
@@ -862,12 +911,16 @@ function summarizeSmtpHits(hits, domain, days) {
       reports += 1; const pass = Number(policy.successful_session_count || policy.summary?.total_successful_session_count || 0); const fail = Number(policy.failed_session_count || policy.summary?.total_failure_session_count || 0);
       successful += pass; failed += fail;
       if (date) { const day = timeline.get(date) || { date, successful: 0, failed: 0 }; day.successful += pass; day.failed += fail; timeline.set(date, day); }
-      organizations.set(organization, (organizations.get(organization) || 0) + pass + fail);
+      const reporter = organizations.get(organization) || { name: organization, sessions: 0, reports: 0, domains: new Set() };
+      reporter.sessions += pass + fail; reporter.reports += 1;
+      const reporterDomain = contactDomain(source.contact_info);
+      if (reporterDomain) reporter.domains.add(reporterDomain);
+      organizations.set(organization, reporter);
       for (const detail of policy.failure_details || []) { const type = detail.result_type || 'unspecified'; failures.set(type, (failures.get(type) || 0) + Number(detail.failed_session_count || 0)); }
     }
   }
   const total = successful + failed;
-  return { available: true, period_days: days, reports, successful, failed, success_rate: total ? Math.round(successful / total * 1000) / 10 : null, timeline: [...timeline.values()].sort((a, b) => a.date.localeCompare(b.date)), failure_types: [...failures].map(([type, count]) => ({ type, count })).sort((a, b) => b.count - a.count).slice(0, 8), organizations: [...organizations].map(([name, sessions]) => ({ name, sessions })).sort((a, b) => b.sessions - a.sessions).slice(0, 8), raw_samples: rawSamples };
+  return { available: true, period_days: days, reports, successful, failed, success_rate: total ? Math.round(successful / total * 1000) / 10 : null, timeline: [...timeline.values()].sort((a, b) => a.date.localeCompare(b.date)), failure_types: [...failures].map(([type, count]) => ({ type, count })).sort((a, b) => b.count - a.count).slice(0, 8), organizations: [...organizations.values()].map(item => ({ ...item, domains: [...item.domains] })).sort((a, b) => b.sessions - a.sessions).slice(0, 8), raw_samples: rawSamples };
 }
 
 async function smtpTlsReports(domain, config, days) {
@@ -878,19 +931,19 @@ async function smtpTlsReports(domain, config, days) {
   } catch (error) { return { available: false, reports: 0, error: error.message, period_days: days }; }
 }
 
-function summarize(domain, checks, reportSections = {}) { const rank = { healthy: 0, ignored: 0, info: 1, warning: 2, critical: 3 }; return { domain, status: checks.reduce((a, v) => rank[v.status] > rank[a] ? v.status : a, 'healthy'), checks, reports: reportSections, counts: { critical: checks.filter(v => v.status === 'critical').length, warning: checks.filter(v => v.status === 'warning').length, ignored: checks.filter(v => v.status === 'ignored').length, healthy: checks.filter(v => v.status === 'healthy').length } }; }
+function summarize(domain, checks, reportSections = {}) { const rank = { healthy: 0, ignored: 0, info: 0, warning: 2, critical: 3 }; return { domain, status: checks.reduce((a, v) => rank[v.status] > rank[a] ? v.status : a, 'healthy'), checks, reports: reportSections, counts: { critical: checks.filter(v => v.status === 'critical').length, warning: checks.filter(v => v.status === 'warning').length, ignored: checks.filter(v => v.status === 'ignored').length, healthy: checks.filter(v => v.status === 'healthy').length } }; }
 async function checkDomain(entry, config) {
-  const dm = await dmarc(entry.domain); const [sts, tlsreport, smtpService, brand, keys, aggregate, failures, smtpTls, ...certs] = await Promise.all([mtaSts(entry.domain), tlsRpt(entry.domain), smtpDiagnostics(entry.domain, { timeout_ms: requestTimeoutMs }), bimi(entry.domain, dm, entry.bimi_exception), dkim(entry.domain, entry.dkim_selectors), reports(entry.domain, config.opensearch, entry.report_days), failureReports(entry.domain, config.opensearch, entry.report_days), smtpTlsReports(entry.domain, config.opensearch, entry.report_days), ...entry.tls_endpoints.map(certificate)]);
+  const dm = await dmarc(entry.domain); const [senderPolicy, sts, tlsreport, smtpService, brand, keys, aggregate, failures, smtpTls, reputation, ...certs] = await Promise.all([spfCheck(entry.domain, { timeout_ms: requestTimeoutMs }), mtaSts(entry.domain), tlsRptCheck(entry.domain, { timeout_ms: requestTimeoutMs }), smtpDiagnostics(entry.domain, { timeout_ms: requestTimeoutMs }), bimi(entry.domain, dm, entry.bimi_exception), dkim(entry.domain, entry.dkim_selectors), reports(entry.domain, config.opensearch, entry.report_days), failureReports(entry.domain, config.opensearch, entry.report_days), smtpTlsReports(entry.domain, config.opensearch, entry.report_days), reputationCheck(entry.domain, { timeout_ms: requestTimeoutMs }), ...entry.tls_endpoints.map(certificate)]);
   if (!certs.length) certs.push(result('tls_config', 'TLS certificate', 'warning', 'No endpoints configured', 'No certificate endpoints are configured for this domain.', 'Add a TLS endpoint for this domain in Settings.', { domain: entry.domain, host: entry.domain, port: null }));
-  return summarize(entry.domain, [dm, aggregate, keys, sts, tlsreport, smtpService, ...certs, brand], { aggregate: aggregate.evidence || {}, failure: failures, smtp_tls: smtpTls, smtp_diagnostics: smtpService.evidence || {} });
+  return summarize(entry.domain, [dm, senderPolicy, aggregate, keys, sts, tlsreport, smtpService, ...certs, brand, reputation], { aggregate: aggregate.evidence || {}, failure: failures, smtp_tls: smtpTls, smtp_diagnostics: smtpService.evidence || {} });
 }
 function demo() {
-  const aggregate = { period_days: 7, total: 15234, passed: 13985, failed: 1249, pass_rate: 91.8, dkim_pass_rate: 89.7, spf_pass_rate: 96.2, timeline: [{date:'2026-08-27',total:1820,failed:180},{date:'2026-08-28',total:2110,failed:220},{date:'2026-08-29',total:1984,failed:175},{date:'2026-08-30',total:2400,failed:164},{date:'2026-08-31',total:2290,failed:190},{date:'2026-09-01',total:2510,failed:200},{date:'2026-09-02',total:2120,failed:120}], top_failing_sources:[{ip:'192.0.2.10',fqdn:'outbound.example.net',network_owner:'Example Mail',messages:620},{ip:'198.51.100.8',fqdn:'relay.example.org',messages:381}] };
+  const aggregate = { period_days: 7, total: 15234, passed: 13985, failed: 1249, pass_rate: 91.8, dkim_pass_rate: 89.7, spf_pass_rate: 96.2, passed_dkim_aligned_rate:97.7,passed_spf_aligned_rate:96.4,failed_dkim_aligned_rate:0,failed_spf_aligned_rate:0, reporters:[{name:'Example Receiver',domain:'example.net',reports:7,messages:10200,last_report:'2026-09-02T23:59:59Z'},{name:'Mailbox Provider',domain:'mail.example.org',reports:6,messages:5034,last_report:'2026-09-02T23:59:59Z'}], timeline: [{date:'2026-08-27',total:1820,failed:180},{date:'2026-08-28',total:2110,failed:220},{date:'2026-08-29',total:1984,failed:175},{date:'2026-08-30',total:2400,failed:164},{date:'2026-08-31',total:2290,failed:190},{date:'2026-09-01',total:2510,failed:200},{date:'2026-09-02',total:2120,failed:120}], top_failing_sources:[{ip:'192.0.2.10',fqdn:'outbound.example.net',network_owner:'Example Mail',messages:620},{ip:'198.51.100.8',fqdn:'relay.example.org',messages:381}] };
   const aggregateCheck = result('dmarc_reports','DMARC reports','critical','91.8% aligned','1,249 messages failed in 7 days.','Review the top failing sources.',aggregate);
   const smtpEndpoint = evaluateSmtpEvidence('mail.example.com', { host:'mail.example.com',port:25,ip_address:'192.0.2.25',connection_time_ms:7300,transaction_time_ms:7966,reverse_dns:['mail.example.com'],forward_confirmed:true,reverse_dns_match:true,banner:'220 mail.example.com ESMTP ready',banner_hostname:'mail.example.com',banner_matches_reverse_dns:true,starttls_advertised:true,starttls_negotiated:true,tls_authorized:true,tls_protocol:'TLSv1.3',tls_cipher:'TLS_AES_256_GCM_SHA384',relay_status:'denied',rcpt_to_code:550,transcript:['S: 220 mail.example.com ESMTP ready','C: EHLO mailposture.invalid','S: 250-mail.example.com','S: 250 STARTTLS','C: MAIL FROM:<probe@example.com>','S: 250 Sender accepted','C: RCPT TO:<probe@example.net>','S: 550 Relaying denied','C: RSET','S: 250 Reset','C: STARTTLS','S: 220 Ready to start TLS','C: EHLO mailposture.invalid','S: 250 mail.example.com'] });
   const smtpService = smtpResult('example.com', [{priority:10,exchange:'mail.example.com'}], [smtpEndpoint]);
-  const smtpTls = {available:true,reports:4,successful:8200,failed:14,success_rate:99.8,timeline:[{date:'2026-08-30',successful:1800,failed:6},{date:'2026-09-01',successful:3200,failed:5},{date:'2026-09-02',successful:3200,failed:3}],failure_types:[{type:'validation-failure',count:9},{type:'starttls-not-supported',count:5}],organizations:[{name:'Example Reporter',sessions:8214}],raw_samples:[{index:'smtp_tls-2026.09',organization_name:'Example Reporter',contact_info:'tls@example.net',report_id:'demo-report',date_begin:'2026-09-01T00:00:00Z',source_fields:['contact_info','date_begin','organization_name','policies','report_id']}] };
-  return summarize('example.com', [result('dmarc','DMARC','warning','Quarantine · 25%','Enforcement covers only 25%.','Increase enforcement after resolving legitimate senders.'), aggregateCheck, result('dkim','DKIM','warning','1/2 selectors healthy','legacy: 1024-bit key','Rotate the legacy key.'), result('mta_sts','MTA-STS','healthy','Enforced','Every MX host is covered.','Rotate the DNS id after changes.'), result('tls_rpt','TLS reporting','healthy','Reports enabled','SMTP TLS failures have a report destination.','Review TLS reports.'), smtpService, result('tls_demo','TLS certificate','healthy','64 days remaining','Certificate is trusted.','No action required.',{host:'mail.example.com',port:465,days_remaining:64}), result('bimi','BIMI','ignored','Self-asserted logo · Ignored','No mark certificate is published. This review item is ignored permanently.','No action is required while this exception remains active.',{ignored:true,ignore_mode:'permanent',original_status:'warning'})], { aggregate, failure:{available:false,count:0,period_days:7}, smtp_tls:smtpTls, smtp_diagnostics:smtpService.evidence });
+  const smtpTls = {available:true,reports:4,successful:8200,failed:14,success_rate:99.8,timeline:[{date:'2026-08-30',successful:1800,failed:6},{date:'2026-09-01',successful:3200,failed:5},{date:'2026-09-02',successful:3200,failed:3}],failure_types:[{type:'validation-failure',count:9},{type:'starttls-not-supported',count:5}],organizations:[{name:'Example Reporter',domains:['example.net'],reports:4,sessions:8214}],raw_samples:[{index:'smtp_tls-2026.09',organization_name:'Example Reporter',contact_info:'tls@example.net',report_id:'demo-report',date_begin:'2026-09-01T00:00:00Z',source_fields:['contact_info','date_begin','organization_name','policies','report_id']}] };
+  return summarize('example.com', [result('dmarc','DMARC','warning','Quarantine · 25%','Enforcement covers only 25%.','Increase enforcement after resolving legitimate senders.'), result('spf','SPF','healthy','Valid policy · 2/10 lookups','One SPF record is published and ends in -all.','Review the policy when senders change.'), aggregateCheck, result('dkim','DKIM','warning','1/2 selectors healthy','legacy: 1024-bit key','Rotate the legacy key.'), result('mta_sts','MTA-STS','healthy','Enforced','Every MX host is covered.','Rotate the DNS id after changes.'), result('tls_rpt','TLS reporting','healthy','1 report destination','Valid TLSRPTv1 policy using mailto.','Review TLS reports.'), smtpService, result('tls_demo','TLS certificate','healthy','64 days remaining','Certificate is trusted.','No action required.',{host:'mail.example.com',port:465,days_remaining:64}), result('bimi','BIMI','ignored','Self-asserted logo · Ignored','No mark certificate is published. This review item is ignored permanently.','No action is required while this exception remains active.',{ignored:true,ignore_mode:'permanent',original_status:'warning'}), result('reputation','IP and domain reputation','healthy','No blocklist matches','Three DNS-blocklist checks completed.','Continue monitoring.',{checks:[]})], { aggregate, failure:{available:false,count:0,period_days:7}, smtp_tls:smtpTls, smtp_diagnostics:smtpService.evidence });
 }
 
 async function refresh() {
@@ -936,4 +989,4 @@ const server = http.createServer(async (req,res) => {
 });
 function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`MailPosture listening on :${PORT}`); addDiagnosticEvent('mailposture', 'info', 'MailPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, activeBimiException, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, refresh, getSnapshot:()=>snapshot };
+module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, activeBimiException, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, refresh, getSnapshot:()=>snapshot };

@@ -21,7 +21,7 @@
   <header>
     <a class="brand" href="/" data-route="/">
       <img src="/mailposture.svg" alt="">
-      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v1.3.0</small></span>
+      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v1.4.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
       <a class="toolbar-button" href="/" data-route="/"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span>Dashboard</span></a>
@@ -59,13 +59,13 @@
     <section id="hero" class="hero"></section>
     <nav id="domains" aria-label="Domains"></nav>
     <section id="attention" class="attention"></section>
-    <section class="report-center" id="report-center" tabindex="-1">
-      <div class="heading"><div><small>Report center</small><h2>Mail traffic and services</h2></div><p>Historical report data and live SMTP diagnostics.</p></div>
-      <div id="domain-reports" class="report-grid"></div>
-    </section>
     <section class="matrix">
       <div class="heading"><div><small>Control matrix</small><h2>Everything at a glance</h2></div><p>Open a control for evidence and its next step.</p></div>
       <div id="checks" class="checks"></div>
+    </section>
+    <section class="report-center" id="report-center" tabindex="-1">
+      <div class="heading"><div><small>Report center</small><h2>Observed email traffic</h2></div><p>Historical DMARC and SMTP TLS report data, followed by live SMTP diagnostics.</p></div>
+      <div id="domain-reports" class="report-grid"></div>
     </section>
   </main>
 
@@ -193,14 +193,16 @@
       <div class="heading"><div><small>Checks</small><h2>What MailPosture evaluates</h2></div></div>
       <div class="glossary-grid">
         <article><h3>DMARC</h3><p>Checks whether the domain publishes one valid DMARC policy, its enforcement level, coverage percentage, and aggregate-report destination.</p></article>
-        <article><h3>DMARC aggregate reports</h3><p>Shows message volume, DMARC, DKIM, and SPF alignment, stacked daily results, and the top failing sources without exposing message content. A failed-message count here does not imply that a matching RUF report exists.</p></article>
+        <article><h3>SPF</h3><p>Checks for exactly one SPF record, expands include and redirect references, detects invalid or unsafe mechanisms, counts DNS-querying terms against the limit of 10, and identifies softfail or policies that authorize every sender.</p></article>
+        <article><h3>DMARC aggregate reports</h3><p>Shows message volume, separate alignment rates for messages that passed and failed DMARC, stacked daily results, top failing sources, and the receiving services that supplied reports. A failed-message count here does not imply that a matching RUF report exists.</p></article>
         <article><h3>Individual DMARC failure reports (RUF)</h3><p>Counts optional, message-level reports sent by some receiving providers. This count is separate from the failed-message total in aggregate reports. No matching index generally means that no RUF report has arrived, not that ParseDMARC failed. MailPosture does not display message samples because they can contain personal or confidential content.</p></article>
         <article><h3>DKIM</h3><p>Checks each configured selector for a published public key and reports missing, revoked, or weak RSA keys. Selectors must be entered because DNS cannot reliably discover them.</p></article>
         <article><h3>MTA-STS</h3><p>Checks the DNS signal, HTTPS policy file, policy mode, and whether the policy covers every published MX host.</p></article>
-        <article><h3>TLS reporting</h3><p>Checks for a valid TLS-RPT record and summarizes stacked SMTP session results, reporting organizations, and failure types from parsedmarc. A reporting organization is an outside mail provider that supplied TLS-RPT data about its delivery attempts to your domain. The values count SMTP sessions, not messages. Use Show reporter source fields to verify the organization fields stored by parsedmarc when a name is missing. Processed reports normally move to <code>Archive/SMTP-TLS</code>; MailPosture reads the normalized OpenSearch data.</p></article>
+        <article><h3>TLS reporting</h3><p>Looks up <code>_smtp._tls</code>, requires exactly one TLSRPTv1 policy, validates its syntax, and validates each mailto or HTTPS rua destination. It also summarizes stacked SMTP session results, reporting organizations, and failure types from parsedmarc. The values count SMTP sessions, not messages. Processed reports normally move to <code>Archive/SMTP-TLS</code>; MailPosture reads the normalized OpenSearch data.</p></article>
         <article><h3>SMTP service</h3><p>Tests each published MX host on TCP port 25 for connection and transaction time, forward-confirmed reverse DNS, a valid host name, banner alignment, STARTTLS negotiation and certificate trust, and unauthenticated relay protection. Results reflect MailPosture’s network location, and the container must be allowed outbound TCP port 25. The relay probe uses reserved example addresses and stops before DATA, so it never sends a message. If the server accepts the recipient from MailPosture’s network, verify from an external network because a locally trusted source can relay by design.</p></article>
         <article><h3>TLS certificates</h3><p>Connects to configured direct-TLS endpoints, validates trust, and reports days until expiration. SMTP STARTTLS for published MX hosts is tested separately by SMTP service diagnostics.</p></article>
-        <article><h3>BIMI</h3><p>Checks the BIMI record, DMARC prerequisites, HTTPS logo, safe SVG content, and whether a mark certificate URL is published. After validation, the logo appears on the BIMI control card through MailPosture’s same-origin image endpoint. If you intentionally use a self-asserted logo without a VMC or CMC, edit the domain to ignore only that review item permanently or for 1–120 months. Other BIMI problems remain actionable.</p></article>
+        <article><h3>BIMI</h3><p>Checks the BIMI record, DMARC prerequisites, HTTPS logo, safe SVG content, and whether a mark certificate URL is published. After validation, the logo appears on the BIMI control card through MailPosture’s same-origin image endpoint. You can independently ignore an intentionally self-asserted logo or intentionally absent logo permanently or for 1–120 months. Invalid records, unsafe logos, and unmet DMARC requirements remain actionable.</p></article>
+        <article><h3>IP and domain reputation</h3><p>Screens the monitored domain and its receiving MX addresses against Spamhaus DBL, Spamhaus ZEN, and SpamCop through DNS. It is not a complete reputation score or a deliverability guarantee. Outbound sending services can use different IP addresses and should be checked separately. An unavailable provider is never reported as clean.</p></article>
       </div>
     </section>
     <section class="help-section">
@@ -247,10 +249,12 @@
         <div class="inline-editor endpoint-editor"><input id="endpoint-host" type="text" placeholder="mail.example.com" aria-label="TLS host"><input id="endpoint-port" type="number" min="1" max="65535" value="443" aria-label="TLS port"><button id="endpoint-add" class="symbol-button" type="button" aria-label="Add TLS endpoint" title="Add endpoint">＋</button></div>
       </section>
       <section class="editor-section">
-        <div><h3>BIMI review exception</h3><p>Hide only the “Self-asserted logo” review item. MailPosture continues checking the BIMI record and logo, and other BIMI problems still require attention.</p></div>
+        <div><h3>BIMI review exceptions</h3><p>Ignore an intentionally self-asserted logo or intentionally absent logo. Invalid records, unsafe logos, and unmet DMARC requirements still need attention.</p></div>
         <div class="field"><label for="bimi-ignore-mode">Self-asserted logo</label><select id="bimi-ignore-mode"><option value="none">Continue showing Review</option><option value="temporary">Ignore for a set period</option><option value="permanent">Ignore permanently</option></select></div>
         <div id="bimi-ignore-months-field" class="field" hidden><label for="bimi-ignore-months">Number of months</label><input id="bimi-ignore-months" type="number" min="1" max="120" value="6"><p id="bimi-ignore-expiration"></p></div>
-        <p class="settings-note">An ignored result remains visible on the BIMI card and is labeled Ignored. It is removed from the attention queue and does not lower the posture score.</p>
+        <div class="field"><label for="bimi-no-logo-ignore-mode">No BIMI logo</label><select id="bimi-no-logo-ignore-mode"><option value="none">Continue showing Review</option><option value="temporary">Ignore for a set period</option><option value="permanent">Ignore permanently</option></select></div>
+        <div id="bimi-no-logo-ignore-months-field" class="field" hidden><label for="bimi-no-logo-ignore-months">Number of months</label><input id="bimi-no-logo-ignore-months" type="number" min="1" max="120" value="6"><p id="bimi-no-logo-ignore-expiration"></p></div>
+        <p class="settings-note">Each ignored result remains visible on the BIMI card and is labeled Ignored. It is removed from the attention queue and does not lower the posture score.</p>
       </section>
       <p id="domain-message" class="failure" role="alert"></p>
       <div class="dialog-actions"><button class="secondary domain-cancel" type="button">Cancel</button><button type="submit">Save domain</button></div>

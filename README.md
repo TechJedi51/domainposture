@@ -1,6 +1,6 @@
 # MailPosture with Dockhand
 
-MailPosture is a generic, management-focused status page for DMARC aggregate and failure reports, SMTP TLS reports, live SMTP service diagnostics, DKIM, MTA-STS, TLS certificates, and BIMI. It contains no user-specific domain configuration. Operational settings are entered in the web interface and saved in persistent storage; Dockhand supplies deployment secrets and storage paths.
+MailPosture is a generic, management-focused status page for SPF, DMARC aggregate and failure reports, SMTP TLS reports, live SMTP service diagnostics, DKIM, MTA-STS, TLS certificates, BIMI, and limited IP/domain reputation screening. It contains no user-specific domain configuration. Operational settings are entered in the web interface and saved in persistent storage; Dockhand supplies deployment secrets and storage paths.
 
 ## Included files
 
@@ -13,6 +13,7 @@ mailposture/
 ├── .env.example
 ├── server.js
 ├── smtp.js
+├── dns-security.js
 ├── public/
 └── test/
 ```
@@ -72,11 +73,19 @@ The standalone stack also uses the small `parsedmarc_status` Docker volume for a
 
 DMARC aggregate failures and DMARC failure reports are different measurements. Aggregate reports count messages that failed DMARC. Failure reports, also called RUF or forensic reports, are optional individual reports that many receivers do not send. It is therefore normal for an aggregate report to show failed messages while the RUF report count is zero. MailPosture shows only RUF counts because those reports may contain personal or confidential message data.
 
+The aggregate report card separates messages that passed DMARC from messages that failed it. DKIM-aligned and SPF-aligned percentages use only the messages in their respective row. Because DMARC needs either aligned DKIM or aligned SPF, those percentages can overlap. The DMARC reports list identifies the receiving organizations and reporter domains found in the 1,000 most recent matching OpenSearch documents; totals and alignment rates still use all matching documents in the selected period.
+
 TLS reporting organizations are the outside mail providers that sent TLS-RPT data about delivery attempts to a monitored domain. Their values count SMTP sessions, not email messages. MailPosture recognizes current and legacy parsedmarc organization fields. When a report has no recognized name, the interface says **Reporter name not provided** and provides a limited raw-field view so you can verify what was stored without exposing policy details or message content.
+
+The SPF check validates that exactly one SPF policy is published, expands static `include` and `redirect` references, checks the RFC limit of 10 DNS-querying terms, flags recursive references and malformed IP networks, and distinguishes `-all`, `~all`, and unsafe catch-all policies. DNS timeouts produce an incomplete or unavailable result instead of a false pass.
+
+The TLS-RPT check looks up `_smtp._tls.<domain>`, requires exactly one `v=TLSRPTv1` record, and validates each `rua` destination as a `mailto` or HTTPS URI. This DNS policy check is separate from the report history collected by parsedmarc.
+
+The reputation check performs a limited DNS-based screen of the monitored domain through Spamhaus DBL and the domain's receiving MX addresses through Spamhaus ZEN and SpamCop. It does not replace a deliverability service, and receiving MX addresses are often different from outbound sending addresses. Provider access failures are shown as unavailable and never as clean. Verify a reported listing with the named provider before remediation; DNS blocklists have their own access and removal policies.
 
 Top failing DMARC sources include the source IP address and, when available, parsedmarc's saved host name, base domain, and network owner. If no saved host name exists, MailPosture attempts a bounded reverse-DNS lookup. A PTR name is supporting context and is not proof that the named organization authorized the traffic.
 
-When BIMI publishes a safe SVG logo over HTTPS and passes validation, MailPosture displays it on the BIMI control card through a same-origin, sandboxed image response. Remote logo markup is not inserted into the page. If a domain intentionally uses a self-asserted logo without a VMC or CMC, its domain editor can ignore only that review item permanently or for 1–120 months. The BIMI card remains visible and labeled **Ignored**; invalid records, unsafe logos, and unmet DMARC prerequisites are never suppressed.
+When BIMI publishes a safe SVG logo over HTTPS and passes validation, MailPosture displays it on the BIMI control card through a same-origin, sandboxed image response. Remote logo markup is not inserted into the page. A domain editor can independently ignore an intentionally self-asserted logo or intentionally absent logo permanently or for 1–120 months. The BIMI card remains visible and labeled **Ignored**; invalid records, unsafe logos, and unmet DMARC prerequisites are never suppressed.
 
 The parsedmarc tab manages the general, mailbox, IMAP, and OpenSearch options used by the bundled IMAP-to-OpenSearch pipeline. Monthly indexes are enabled by default for new configurations to avoid creating a large number of small report indexes. For a single OpenSearch node, use one shard and zero replicas. Less common outputs and collectors, including Kafka, S3, Splunk, Gmail API, and Microsoft Graph, remain advanced file-based configuration. MailPosture does not parse, move, or delete report messages itself; parsedmarc performs the configured mailbox actions.
 
@@ -137,7 +146,7 @@ The first push to `main` starts **Test and publish container image** under the r
 - builds `linux/amd64` and `linux/arm64` images;
 - publishes `ghcr.io/OWNER/REPOSITORY:latest`;
 - also publishes an immutable `sha-...` tag;
-- publishes version tags when a tag such as `v1.3.0` is pushed.
+- publishes version tags when a tag such as `v1.4.0` is pushed.
 
 No registry password is required in the workflow. GitHub's temporary `GITHUB_TOKEN` publishes the image to the repository's GHCR package.
 
@@ -211,7 +220,7 @@ MailPosture uses semantic versioning:
 - Features increment the second number and reset the third number to zero, such as `1.2.1` to `1.3.0`.
 - Incompatible changes increment the first number.
 
-This feature release is version `1.3.0`.
+This feature release is version `1.4.0`.
 
 ## 5. Reverse proxy
 
