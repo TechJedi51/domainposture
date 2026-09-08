@@ -206,7 +206,7 @@ async function run(){
   assert.strictEqual(shards.affected_report_shards,0);
   assert.strictEqual(shards.groups.find(group=>group.category==='OpenSearch security audit logs').unassigned_shards,1);
   process.env.DEMO_MODE='true';const status=await app.refresh();assert.strictEqual(status.domains.length,1);assert.ok(status.summary.critical>0);assert.strictEqual(status.version,require('../package.json').version);assert.strictEqual(status.domains[0].mail_profile.provider,'self_hosted');
-  assert.strictEqual(require('../package.json').version,'2.0.0');
+  assert.strictEqual(require('../package.json').version,'2.1.0');
   const page=fs.readFileSync('public/index.html','utf8'),client=fs.readFileSync('public/app.js','utf8'),styles=fs.readFileSync('public/settings.css','utf8'),icon=fs.readFileSync('public/mailposture.svg','utf8'),standalone=fs.readFileSync('compose.standalone.yml','utf8'),dockerfile=fs.readFileSync('Dockerfile','utf8'),smtpSource=fs.readFileSync('smtp.js','utf8');
   assert.match(page,/MailPosture/);
   assert.match(page,/id="dashboard-view"/);
@@ -216,7 +216,7 @@ async function run(){
   assert.match(page,/id="log-service"/);
   assert.match(page,/id="service-log"/);
   assert.match(page,/id="service-log-service"/);
-  assert.match(page,/v2\.0\.0/);
+  assert.match(page,/v2\.1\.0/);
   assert.match(page,/Mail Security Dashboard/);
   assert.doesNotMatch(page,/DMARC authentication and SMTP TLS delivery results for the selected history window/);
   assert.match(page,/id="domain-menu-button"/);

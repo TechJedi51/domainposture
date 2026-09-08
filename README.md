@@ -152,7 +152,7 @@ The first push to `main` starts **Test and publish container image** under the r
 - builds `linux/amd64` and `linux/arm64` images;
 - publishes `ghcr.io/OWNER/REPOSITORY:latest`;
 - also publishes an immutable `sha-...` tag;
-- publishes version tags when a tag such as `v2.0.0` is pushed.
+- publishes version tags when a tag such as `v2.1.0` is pushed.
 
 No registry password is required in the workflow. GitHub's temporary `GITHUB_TOKEN` publishes the image to the repository's GHCR package.
 
@@ -226,7 +226,7 @@ MailPosture uses semantic versioning:
 - Features increment the second number and reset the third number to zero, such as `1.2.1` to `1.3.0`.
 - Incompatible changes increment the first number.
 
-This major feature release is version `2.0.0`.
+This feature release is version `2.1.0`.
 
 ## 5. Reverse proxy
 
