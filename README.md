@@ -34,7 +34,7 @@ After the first deployment, select the gear button in MailPosture. The Monitored
 
 ### Domains
 
-Select the plus button to add a domain. Use the edit button beside a domain to change its name or manage its DKIM selectors and TLS certificate endpoints. Domain removal remains pending until **Save settings** is selected.
+Select the plus button to add a domain. Use the edit button beside a domain to change its name; select its inbound-mail hosting type and provider; identify whether relay probes run from a trusted or external network; or manage its DKIM selectors and TLS certificate endpoints. Automatic provider detection recognizes Google Workspace, Microsoft 365, Hover, iCloud Mail, and self-hosted MX names. Domain removal remains pending until **Save settings** is selected.
 
 Add every domain that appears after the `@` in an organization-managed From address.
 
@@ -46,7 +46,9 @@ Edit a domain, then add each active selector by its label, such as `selector1` o
 
 Edit a domain, then add each endpoint as a host and port, such as `mta-sts.example.com` on port `443` or `mail.example.com` on port `465`.
 
-Direct TLS endpoints such as HTTPS 443, SMTP 465, and IMAP 993 are supported. MailPosture also discovers every monitored domain’s published MX hosts and probes SMTP on TCP port 25. It measures connection and transaction time, checks reverse DNS and the SMTP banner host, negotiates STARTTLS before testing the mail envelope, checks certificate trust, and checks whether an unauthenticated external recipient is rejected. Results reflect MailPosture’s network location, and the container must be allowed outbound TCP port 25. When the receiving provider blocks the monitoring source address, TLS and relay checks are labeled **Not tested** rather than failed; use a permitted static address or another external monitoring location. The relay probe uses reserved example addresses and stops before `DATA`; it never submits message content. If the recipient is accepted, MailPosture reports **External verification required** rather than declaring an open relay: a mail server can legitimately permit relaying from the trusted network where MailPosture runs, so a conclusive public test must originate outside that network.
+Direct TLS endpoints such as HTTPS 443, SMTP 465, and IMAP 993 are supported. MailPosture also discovers every monitored domain’s published MX hosts and probes SMTP on TCP port 25. It checks reachability and the SMTP greeting, negotiates STARTTLS before testing the mail envelope, validates certificate trust against the MX hostname, and checks whether an unauthenticated external recipient is rejected. Reverse DNS, banner alignment, and timing from one location remain visible as supporting diagnostics; valid provider-owned identities and slow single-location timing are informational rather than protocol failures. Results reflect MailPosture’s network location, and the container must be allowed outbound TCP port 25. When the receiving provider blocks the monitoring source address, TLS and relay checks are labeled **Not tested** rather than failed. The relay probe uses reserved example addresses and stops before `DATA`; it never submits message content. If the recipient is accepted, the result is critical only when the domain is configured to identify this installation as external and untrusted. Otherwise MailPosture requests external verification.
+
+Under **Monitoring behavior**, optionally provide a public SMTP probe hostname whose A/AAAA and PTR records identify this MailPosture installation. When it is blank, MailPosture uses the local connection address as an SMTP address literal instead of claiming an unresolvable hostname.
 
 The Domains button opens a status-aware menu. Under **Settings → Appearance**, choose whether that menu lists domains by priority—needs action, review, then healthy—or alphabetically. This preference is stored in the current browser with the color-mode preference.
 
@@ -148,7 +150,7 @@ The first push to `main` starts **Test and publish container image** under the r
 - builds `linux/amd64` and `linux/arm64` images;
 - publishes `ghcr.io/OWNER/REPOSITORY:latest`;
 - also publishes an immutable `sha-...` tag;
-- publishes version tags when a tag such as `v1.5.0` is pushed.
+- publishes version tags when a tag such as `v2.0.0` is pushed.
 
 No registry password is required in the workflow. GitHub's temporary `GITHUB_TOKEN` publishes the image to the repository's GHCR package.
 
@@ -222,7 +224,7 @@ MailPosture uses semantic versioning:
 - Features increment the second number and reset the third number to zero, such as `1.2.1` to `1.3.0`.
 - Incompatible changes increment the first number.
 
-This feature release is version `1.5.0`.
+This major feature release is version `2.0.0`.
 
 ## 5. Reverse proxy
 

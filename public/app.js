@@ -123,7 +123,9 @@ function smtpDiagnosticsCard(report, id = '') {
     const transcript = endpoint.transcript?.length ? `<details class="smtp-transcript"><summary>Session transcript</summary><p>The probe uses reserved example addresses and stops before DATA. No message content is sent.</p><pre>${esc(endpoint.transcript.join('\n'))}</pre></details>` : '';
     return `<section class="smtp-endpoint"><div class="smtp-endpoint-heading"><div><strong>${esc(endpoint.host)}:${number(endpoint.port || 25)}</strong><span>${esc(endpoint.ip_address || 'Address unavailable')}</span></div><span class="state ${esc(endpoint.status)}">${esc(names[endpoint.status] || endpoint.status)}</span></div><div class="smtp-tests">${tests}</div>${transcript}</section>`;
   }).join('');
-  return `<article${reportId(id)} class="report-card wide"><div class="report-card-header"><div><h3>MX endpoint results</h3><p>Connection speed, server identity, STARTTLS, and relay protection for each published MX host.</p></div></div><p class="report-explanation">Connection and transaction times at or above 5 seconds need review; times at or above 15 seconds need action. The relay probe never sends DATA or message content. Acceptance from a trusted local network requires a second test from outside the organization before it can be called an open relay.</p><div class="smtp-endpoints">${endpointCards}</div></article>`;
+  const profile = report.profile || {};
+  const profileLabel = profile.hosting_type === 'managed' ? profile.provider_label || 'Managed provider' : profile.hosting_type === 'self_hosted' ? 'Self-hosted' : profile.hosting_type === 'no_inbound' ? 'No inbound mail' : 'Automatic';
+  return `<article${reportId(id)} class="report-card wide"><div class="report-card-header"><div><h3>MX endpoint results</h3><p>Connection, SMTP identity, STARTTLS, and relay protection for each published MX host.</p></div><span class="state info">${esc(profileLabel)}</span></div><p class="report-explanation">PTR and banner names on managed infrastructure may differ from the customer-facing MX name. Slow timing from this single monitoring location is advisory. The relay probe never sends DATA or message content; acceptance is conclusive only from a configured external, untrusted location.</p><div class="smtp-endpoints">${endpointCards}</div></article>`;
 }
 
 function detailCards(reports) {
@@ -387,11 +389,15 @@ function renderSettingsDomains() {
   $('#settings-domain-list').innerHTML = settings.monitored_domains.length ? settings.monitored_domains.map((domain, index) => {
     const selectors = settings.dkim_selectors[domain] || [];
     const endpoints = settings.tls_endpoints[domain] || [];
+    const smtpProfile = settings.smtp_profiles?.[domain] || { hosting_type: 'auto', provider: 'auto' };
     const configured = settings.bimi_exceptions?.[domain] || {};
     const exceptions = [configured.self_asserted || (configured.mode ? configured : null), configured.no_logo].filter(value => value?.mode);
     const active = exceptions.filter(value => value.mode === 'permanent' || (value.mode === 'until' && new Date(value.expires_at) > new Date()));
     const bimiNote = active.length ? ` · ${active.length} BIMI review exception${active.length === 1 ? '' : 's'}` : '';
-    return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} TLS certificate${endpoints.length === 1 ? '' : 's'}${esc(bimiNote)}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
+    const hostingLabels = { auto: 'Auto-detect hosting', self_hosted: 'Self-hosted', managed: 'Managed provider', no_inbound: 'No inbound mail' };
+    const providerLabels = { google: 'Google Workspace', microsoft: 'Microsoft 365', hover: 'Hover', icloud: 'iCloud Mail', other: 'Other provider' };
+    const mailNote = smtpProfile.hosting_type === 'managed' && smtpProfile.provider !== 'auto' ? providerLabels[smtpProfile.provider] : hostingLabels[smtpProfile.hosting_type] || hostingLabels.auto;
+    return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${esc(mailNote)} · ${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} TLS certificate${endpoints.length === 1 ? '' : 's'}${esc(bimiNote)}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
   }).join('') : '<div class="empty-list"><p>No domains are configured.</p><button type="button" data-add-domain>Add a domain</button></div>';
 }
 
@@ -403,6 +409,7 @@ async function loadSettings() {
   $('#report-days').value = settings.report_days;
   $('#refresh-minutes').value = settings.refresh_minutes;
   $('#request-timeout').value = settings.request_timeout_ms;
+  $('#smtp-probe-hostname').value = settings.smtp_probe_hostname || '';
   $('#report-source').value = settings.report_source;
   $('#opensearch-url').value = settings.opensearch_url;
   $('#opensearch-username').value = settings.opensearch_username;
@@ -498,11 +505,13 @@ function openDomainEditor(index = null) {
   const domain = index === null ? '' : state.settings.monitored_domains[index];
   const configured = clone(state.settings.bimi_exceptions?.[domain] || {});
   const exceptions = { self_asserted: configured.self_asserted || (configured.mode ? configured : null), no_logo: configured.no_logo || null };
+  const smtpProfile = clone(state.settings.smtp_profiles?.[domain] || { hosting_type: 'auto', provider: 'auto', expected_hostname: '', relay_context: 'auto' });
   state.editor = {
     index,
     originalDomain: domain,
     selectors: clone(state.settings.dkim_selectors[domain] || []),
     endpoints: clone(state.settings.tls_endpoints[domain] || []),
+    smtpProfile,
     bimiExceptionsOriginal: exceptions,
     bimiExceptionDirty: { self_asserted: false, no_logo: false },
     editingSelector: null,
@@ -510,6 +519,10 @@ function openDomainEditor(index = null) {
   };
   $('#domain-editor-title').textContent = index === null ? 'Add domain' : 'Edit domain';
   $('#domain-name').value = domain;
+  $('#smtp-hosting-type').value = smtpProfile.hosting_type || 'auto';
+  $('#smtp-provider').value = smtpProfile.provider || 'auto';
+  $('#smtp-expected-host').value = smtpProfile.expected_hostname || '';
+  $('#smtp-relay-context').value = smtpProfile.relay_context || 'auto';
   $('#selector-input').value = '';
   $('#selector-add').textContent = '＋';
   $('#endpoint-host').value = '';
@@ -520,7 +533,14 @@ function openDomainEditor(index = null) {
   $('#domain-message').textContent = '';
   renderEditorLists();
   updateBimiIgnoreVisibility();
+  updateMailHostingFields();
   $('#domain-dialog').showModal();
+}
+
+function updateMailHostingFields() {
+  const type = $('#smtp-hosting-type').value;
+  $('#smtp-provider').disabled = ['self_hosted', 'no_inbound'].includes(type);
+  $('#smtp-expected-host-field').hidden = type === 'no_inbound';
 }
 
 function setBimiExceptionFields(kind, modeSelector, monthsSelector) {
@@ -593,6 +613,8 @@ function saveDomain(event) {
   if (!valid) return showDomainError('Enter a valid domain name.');
   const duplicate = state.settings.monitored_domains.findIndex((value, index) => value === domain && index !== state.editor.index);
   if (duplicate >= 0) return showDomainError('That domain is already monitored.');
+  const expectedHostname = $('#smtp-expected-host').value.trim().toLowerCase().replace(/\.$/, '');
+  if (expectedHostname && !/^(?=.{1,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(expectedHostname)) return showDomainError('Enter a valid expected SMTP hostname or leave it blank.');
   let selfAssertedException; let noLogoException;
   try { selfAssertedException = bimiExceptionFromFields('self_asserted', '#bimi-ignore-mode', '#bimi-ignore-months'); noLogoException = bimiExceptionFromFields('no_logo', '#bimi-no-logo-ignore-mode', '#bimi-no-logo-ignore-months'); }
   catch (error) { return showDomainError(error.message); }
@@ -602,10 +624,13 @@ function saveDomain(event) {
   if (oldDomain && oldDomain !== domain) {
     delete state.settings.dkim_selectors[oldDomain];
     delete state.settings.tls_endpoints[oldDomain];
+    if (state.settings.smtp_profiles) delete state.settings.smtp_profiles[oldDomain];
     if (state.settings.bimi_exceptions) delete state.settings.bimi_exceptions[oldDomain];
   }
   state.settings.dkim_selectors[domain] = clone(state.editor.selectors);
   state.settings.tls_endpoints[domain] = clone(state.editor.endpoints);
+  state.settings.smtp_profiles ||= {};
+  state.settings.smtp_profiles[domain] = { hosting_type: $('#smtp-hosting-type').value, provider: $('#smtp-provider').disabled ? 'auto' : $('#smtp-provider').value, expected_hostname: expectedHostname, relay_context: $('#smtp-relay-context').value };
   state.settings.bimi_exceptions ||= {};
   if (selfAssertedException || noLogoException) state.settings.bimi_exceptions[domain] = { ...(selfAssertedException ? { self_asserted: selfAssertedException } : {}), ...(noLogoException ? { no_logo: noLogoException } : {}) };
   else delete state.settings.bimi_exceptions[domain];
@@ -629,6 +654,7 @@ async function saveSettings(event) {
       report_days: Number($('#report-days').value),
       refresh_minutes: Number($('#refresh-minutes').value),
       request_timeout_ms: Number($('#request-timeout').value),
+      smtp_probe_hostname: $('#smtp-probe-hostname').value.trim(),
       report_source: $('#report-source').value,
       opensearch_url: $('#opensearch-url').value.trim(),
       opensearch_username: $('#opensearch-username').value.trim(),
@@ -791,6 +817,7 @@ $('#bimi-ignore-mode').onchange = () => { state.editor.bimiExceptionDirty.self_a
 $('#bimi-ignore-months').oninput = () => { state.editor.bimiExceptionDirty.self_asserted = true; updateBimiIgnoreVisibility(); };
 $('#bimi-no-logo-ignore-mode').onchange = () => { state.editor.bimiExceptionDirty.no_logo = true; updateBimiIgnoreVisibility(); };
 $('#bimi-no-logo-ignore-months').oninput = () => { state.editor.bimiExceptionDirty.no_logo = true; updateBimiIgnoreVisibility(); };
+$('#smtp-hosting-type').onchange = updateMailHostingFields;
 $('#log-service').onchange = renderSystemLogs;
 $('#service-log-service').onchange = loadServiceLogs;
 $('#refresh-service-log').onclick = loadServiceLogs;
@@ -858,6 +885,7 @@ document.onclick = event => {
     const removed = state.settings.monitored_domains.splice(index, 1)[0];
     delete state.settings.dkim_selectors[removed];
     delete state.settings.tls_endpoints[removed];
+    if (state.settings.smtp_profiles) delete state.settings.smtp_profiles[removed];
     if (state.settings.bimi_exceptions) delete state.settings.bimi_exceptions[removed];
     renderSettingsDomains();
     $('#settings-message').textContent = `${removed} was removed. Save settings to apply this change.`;

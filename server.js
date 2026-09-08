@@ -8,7 +8,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { version: PACKAGE_VERSION } = require('./package.json');
-const { smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validHostname: validSmtpHostname, timingTest: smtpTimingTest } = require('./smtp');
+const { smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validHostname: validSmtpHostname, timingTest: smtpTimingTest, resolveSmtpProfile, smtpProfile } = require('./smtp');
 const { spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp } = require('./dns-security');
 
 const PORT = Number(process.env.PORT || 8080);
@@ -142,6 +142,7 @@ function settingsFromEnv() {
     monitored_domains: domains,
     dkim_selectors: selectors,
     tls_endpoints: Object.fromEntries(Object.entries(endpoints).map(([domain, values]) => [domain, values.map(endpointValue)])),
+    smtp_probe_hostname: process.env.SMTP_PROBE_HOSTNAME || '',
     report_days: Number(process.env.REPORT_DAYS || 7),
     refresh_minutes: Number(process.env.REFRESH_MINUTES || 15),
     request_timeout_ms: Number(process.env.REQUEST_TIMEOUT_MS || 8000),
@@ -208,6 +209,22 @@ function normalizeBimiExceptions(input = {}, monitoredDomains = []) {
   return output;
 }
 
+function normalizeSmtpProfiles(input = {}, monitoredDomains = []) {
+  const output = {};
+  for (const [rawDomain, rawProfile] of Object.entries(input || {})) {
+    const domain = String(rawDomain).trim().toLowerCase().replace(/\.$/, '');
+    if (!validDomain(domain) || !monitoredDomains.includes(domain)) continue;
+    const profile = rawProfile || {};
+    const hostingType = ['auto', 'self_hosted', 'managed', 'no_inbound'].includes(profile.hosting_type) ? profile.hosting_type : 'auto';
+    const provider = ['auto', 'google', 'microsoft', 'hover', 'icloud', 'other'].includes(profile.provider) ? profile.provider : 'auto';
+    const relayContext = ['auto', 'external', 'internal'].includes(profile.relay_context) ? profile.relay_context : 'auto';
+    const expectedHostname = textValue(profile.expected_hostname, '', 253).toLowerCase().replace(/\.$/, '');
+    if (expectedHostname && !validDomain(expectedHostname)) throw new Error(`Invalid expected SMTP hostname for ${domain}`);
+    output[domain] = { hosting_type: hostingType, provider, expected_hostname: expectedHostname, relay_context: relayContext };
+  }
+  return output;
+}
+
 function activeBimiException(exception, now = Date.now()) {
   if (exception?.mode === 'permanent') return { active: true, mode: 'permanent', label: 'permanently' };
   if (exception?.mode === 'until') {
@@ -255,11 +272,15 @@ function normalizeSettings(input = {}) {
   const snapshotMin = boundedNumber(input.snapshots?.min_count, 7, 1, 1000, 'Minimum snapshots');
   const snapshotMax = boundedNumber(input.snapshots?.max_count, 60, 1, 10000, 'Maximum snapshots');
   if (snapshotMin > snapshotMax) throw new Error('Minimum snapshots cannot exceed maximum snapshots');
+  const smtpProbeHostname = textValue(input.smtp_probe_hostname, process.env.SMTP_PROBE_HOSTNAME || '', 253).toLowerCase().replace(/\.$/, '');
+  if (smtpProbeHostname && !validDomain(smtpProbeHostname)) throw new Error('SMTP probe hostname must be a fully qualified domain name');
   return {
-    schema_version: 5,
+    schema_version: 6,
     monitored_domains: domains,
     dkim_selectors: selectors,
     tls_endpoints: endpoints,
+    smtp_profiles: normalizeSmtpProfiles(input.smtp_profiles, domains),
+    smtp_probe_hostname: smtpProbeHostname,
     bimi_exceptions: normalizeBimiExceptions(input.bimi_exceptions, domains),
     report_days: boundedNumber(input.report_days, 7, 1, 365, 'Report days'),
     refresh_minutes: boundedNumber(input.refresh_minutes, 15, 1, 1440, 'Refresh minutes'),
@@ -437,6 +458,7 @@ async function saveSettings(value) {
 
 function settingsConfig(settings = getSettings()) {
   return {
+    smtp_probe_hostname: settings.smtp_probe_hostname,
     opensearch: {
       enabled: settings.report_source !== 'disabled',
       url: settings.opensearch_url,
@@ -452,6 +474,7 @@ function settingsConfig(settings = getSettings()) {
       domain,
       dkim_selectors: settings.dkim_selectors[domain] || [],
       tls_endpoints: settings.tls_endpoints[domain] || [],
+      smtp_profile: settings.smtp_profiles[domain] || { hosting_type: 'auto', provider: 'auto', expected_hostname: '', relay_context: 'auto' },
       bimi_exception: settings.bimi_exceptions[domain] || null,
       report_days: settings.report_days
     }))
@@ -740,7 +763,7 @@ function certificate(endpoint) {
   });
 }
 
-async function dkim(domain, selectors) {
+async function dkim(domain, selectors, mailProfile = {}) {
   if (!selectors.length) return result('dkim', 'DKIM', 'warning', 'No selectors configured', 'Selectors cannot be discovered reliably from DNS.', 'Add the active selectors for this domain in Settings.');
   const keys = [];
   for (const selector of selectors) {
@@ -752,7 +775,14 @@ async function dkim(domain, selectors) {
     } catch (error) { keys.push({ selector, status: 'critical', issue: 'record missing' }); }
   }
   const bad = keys.filter(v => v.status !== 'healthy'); const status = keys.some(v => v.status === 'critical') ? 'critical' : bad.length ? 'warning' : 'healthy';
-  return result('dkim', 'DKIM', status, `${keys.length - bad.length}/${keys.length} selectors healthy`, bad.map(v => `${v.selector}: ${v.issue}`).join('; ') || 'Every configured selector publishes a usable key.', status === 'healthy' ? 'Retire old selectors only after mail has aged out.' : 'Replace missing, revoked, or weak keys.', { selectors: keys });
+  const providerManagedWeakKey = mailProfile.hosting_type === 'managed' && bad.length > 0 && bad.every(key => key.status === 'warning' && key.bits >= 1024);
+  const action = status === 'healthy'
+    ? 'Retire old selectors only after mail has aged out.'
+    : providerManagedWeakKey
+      ? `Ask ${mailProfile.provider_label || 'the mail provider'} whether it supports a 2048-bit or stronger DKIM key. Keep the provider-issued record until a replacement is supplied.`
+      : 'Replace missing, revoked, or weak keys.';
+  const detail = bad.map(v => `${v.selector}: ${v.issue}`).join('; ') || 'Every configured selector publishes a usable key.';
+  return result('dkim', 'DKIM', status, `${keys.length - bad.length}/${keys.length} selectors healthy`, providerManagedWeakKey ? `${detail}. The managed mail provider controls key rotation.` : detail, action, { selectors: keys, mail_profile: mailProfile, provider_managed_key: providerManagedWeakKey });
 }
 
 function osApiRequest(config, resource, method = 'GET', body = null) {
@@ -932,15 +962,28 @@ async function smtpTlsReports(domain, config, days) {
 }
 
 function summarize(domain, checks, reportSections = {}) { const rank = { healthy: 0, ignored: 0, info: 0, warning: 2, critical: 3 }; return { domain, status: checks.reduce((a, v) => rank[v.status] > rank[a] ? v.status : a, 'healthy'), checks, reports: reportSections, counts: { critical: checks.filter(v => v.status === 'critical').length, warning: checks.filter(v => v.status === 'warning').length, ignored: checks.filter(v => v.status === 'ignored').length, healthy: checks.filter(v => v.status === 'healthy').length } }; }
+
+function reconcileMtaSts(stsCheck, smtpCheck) {
+  const mode = stsCheck?.evidence?.policy?.mode;
+  if (!['testing', 'enforce'].includes(mode)) return stsCheck;
+  const failedHosts = (smtpCheck?.evidence?.endpoints || []).filter(endpoint => !endpoint.policy_blocked && (!endpoint.starttls_negotiated || endpoint.tls_authorized === false)).map(endpoint => endpoint.host);
+  if (!failedHosts.length) return stsCheck;
+  return result('mta_sts', 'MTA-STS', mode === 'enforce' ? 'critical' : 'warning', mode === 'enforce' ? 'Enforced policy cannot be validated' : 'Testing policy is not ready to enforce', `${stsCheck.detail} The active SMTP probe found a STARTTLS or certificate-validation failure at ${failedHosts.join(', ')}.`, 'Correct STARTTLS and certificate validation on every MX host before relying on MTA-STS enforcement.', { ...stsCheck.evidence, smtp_validation_failed_hosts: failedHosts });
+}
+
 async function checkDomain(entry, config) {
-  const dm = await dmarc(entry.domain); const [senderPolicy, sts, tlsreport, smtpService, brand, keys, aggregate, failures, smtpTls, reputation, ...certs] = await Promise.all([spfCheck(entry.domain, { timeout_ms: requestTimeoutMs }), mtaSts(entry.domain), tlsRptCheck(entry.domain, { timeout_ms: requestTimeoutMs }), smtpDiagnostics(entry.domain, { timeout_ms: requestTimeoutMs }), bimi(entry.domain, dm, entry.bimi_exception), dkim(entry.domain, entry.dkim_selectors), reports(entry.domain, config.opensearch, entry.report_days), failureReports(entry.domain, config.opensearch, entry.report_days), smtpTlsReports(entry.domain, config.opensearch, entry.report_days), reputationCheck(entry.domain, { timeout_ms: requestTimeoutMs }), ...entry.tls_endpoints.map(certificate)]);
-  if (!certs.length) certs.push(result('tls_config', 'TLS certificate', 'warning', 'No endpoints configured', 'No certificate endpoints are configured for this domain.', 'Add a TLS endpoint for this domain in Settings.', { domain: entry.domain, host: entry.domain, port: null }));
+  const mailProfile = await resolveSmtpProfile(entry.domain, entry.smtp_profile);
+  const noInbound = mailProfile.hosting_type === 'no_inbound';
+  const notApplicable = (id, label) => result(id, label, 'info', 'Not applicable', 'This domain is configured not to receive inbound email.', 'No action required while inbound mail remains disabled.', { mail_profile: mailProfile });
+  const dm = await dmarc(entry.domain); const [senderPolicy, stsResult, tlsreport, smtpService, brand, keys, aggregate, failures, smtpTls, reputation, ...certs] = await Promise.all([spfCheck(entry.domain, { timeout_ms: requestTimeoutMs, mail_profile: mailProfile }), noInbound ? Promise.resolve(notApplicable('mta_sts', 'MTA-STS')) : mtaSts(entry.domain), noInbound ? Promise.resolve(notApplicable('tls_rpt', 'TLS reporting')) : tlsRptCheck(entry.domain, { timeout_ms: requestTimeoutMs }), smtpDiagnostics(entry.domain, { timeout_ms: requestTimeoutMs, profile: mailProfile, ehlo_hostname: config.smtp_probe_hostname }), bimi(entry.domain, dm, entry.bimi_exception), dkim(entry.domain, entry.dkim_selectors, mailProfile), reports(entry.domain, config.opensearch, entry.report_days), failureReports(entry.domain, config.opensearch, entry.report_days), smtpTlsReports(entry.domain, config.opensearch, entry.report_days), reputationCheck(entry.domain, { timeout_ms: requestTimeoutMs }), ...entry.tls_endpoints.map(certificate)]);
+  const sts = reconcileMtaSts(stsResult, smtpService);
+  if (!certs.length) certs.push(noInbound ? notApplicable('tls_config', 'TLS certificate') : result('tls_config', 'TLS certificate', 'warning', 'No endpoints configured', 'No certificate endpoints are configured for this domain.', 'Add a TLS endpoint for this domain in Settings.', { domain: entry.domain, host: entry.domain, port: null }));
   return summarize(entry.domain, [dm, senderPolicy, aggregate, keys, sts, tlsreport, smtpService, ...certs, brand, reputation], { aggregate: aggregate.evidence || {}, failure: failures, smtp_tls: smtpTls, smtp_diagnostics: smtpService.evidence || {} });
 }
 function demo() {
   const aggregate = { period_days: 7, total: 15234, passed: 13985, failed: 1249, pass_rate: 91.8, dkim_pass_rate: 89.7, spf_pass_rate: 96.2, passed_dkim_aligned_rate:97.7,passed_spf_aligned_rate:96.4,failed_dkim_aligned_rate:0,failed_spf_aligned_rate:0, reporters:[{name:'Example Receiver',domain:'example.net',reports:7,messages:10200,last_report:'2026-09-02T23:59:59Z'},{name:'Mailbox Provider',domain:'mail.example.org',reports:6,messages:5034,last_report:'2026-09-02T23:59:59Z'}], timeline: [{date:'2026-08-27',total:1820,failed:180},{date:'2026-08-28',total:2110,failed:220},{date:'2026-08-29',total:1984,failed:175},{date:'2026-08-30',total:2400,failed:164},{date:'2026-08-31',total:2290,failed:190},{date:'2026-09-01',total:2510,failed:200},{date:'2026-09-02',total:2120,failed:120}], top_failing_sources:[{ip:'192.0.2.10',fqdn:'outbound.example.net',network_owner:'Example Mail',messages:620},{ip:'198.51.100.8',fqdn:'relay.example.org',messages:381}] };
   const aggregateCheck = result('dmarc_reports','DMARC reports','critical','91.8% aligned','1,249 messages failed in 7 days.','Review the top failing sources.',aggregate);
-  const smtpEndpoint = evaluateSmtpEvidence('mail.example.com', { host:'mail.example.com',port:25,ip_address:'192.0.2.25',connection_time_ms:7300,transaction_time_ms:7966,reverse_dns:['mail.example.com'],forward_confirmed:true,ptr_matches_host:true,reverse_dns_match:true,banner:'220 mail.example.com ESMTP ready',banner_hostname:'mail.example.com',banner_matches_reverse_dns:true,starttls_advertised:true,starttls_negotiated:true,tls_authorized:true,tls_protocol:'TLSv1.3',tls_cipher:'TLS_AES_256_GCM_SHA384',relay_status:'denied',rcpt_to_code:550,transcript:['S: 220 mail.example.com ESMTP ready','C: EHLO mailposture.invalid','S: 250-mail.example.com','S: 250 STARTTLS','C: STARTTLS','S: 220 Ready to start TLS','C: EHLO mailposture.invalid','S: 250 mail.example.com','C: MAIL FROM:<probe@example.com>','S: 250 Sender accepted','C: RCPT TO:<probe@example.net>','S: 550 Relaying denied','C: RSET','S: 250 Reset'] });
+  const smtpEndpoint = evaluateSmtpEvidence('mail.example.com', { host:'mail.example.com',port:25,ip_address:'192.0.2.25',ehlo_identity:'[192.0.2.100]',connection_time_ms:7300,transaction_time_ms:7966,reverse_dns:['mail.example.com'],forward_confirmed:true,ptr_matches_host:true,reverse_dns_match:true,banner:'220 mail.example.com ESMTP ready',banner_hostname:'mail.example.com',banner_matches_reverse_dns:true,starttls_advertised:true,starttls_negotiated:true,tls_authorized:true,tls_protocol:'TLSv1.3',tls_cipher:'TLS_AES_256_GCM_SHA384',relay_status:'denied',rcpt_to_code:550,transcript:['S: 220 mail.example.com ESMTP ready','C: EHLO [192.0.2.100]','S: 250-mail.example.com','S: 250 STARTTLS','C: STARTTLS','S: 220 Ready to start TLS','C: EHLO [192.0.2.100]','S: 250 mail.example.com','C: MAIL FROM:<probe@example.com>','S: 250 Sender accepted','C: RCPT TO:<probe@example.net>','S: 550 Relaying denied','C: RSET','S: 250 Reset'] });
   const smtpService = smtpResult('example.com', [{priority:10,exchange:'mail.example.com'}], [smtpEndpoint]);
   const smtpTls = {available:true,reports:4,successful:8200,failed:14,success_rate:99.8,timeline:[{date:'2026-08-30',successful:1800,failed:6},{date:'2026-09-01',successful:3200,failed:5},{date:'2026-09-02',successful:3200,failed:3}],failure_types:[{type:'validation-failure',count:9},{type:'starttls-not-supported',count:5}],organizations:[{name:'Example Reporter',domains:['example.net'],reports:4,sessions:8214}],raw_samples:[{index:'smtp_tls-2026.09',organization_name:'Example Reporter',contact_info:'tls@example.net',report_id:'demo-report',date_begin:'2026-09-01T00:00:00Z',source_fields:['contact_info','date_begin','organization_name','policies','report_id']}] };
   return summarize('example.com', [result('dmarc','DMARC','warning','Quarantine · 25%','Enforcement covers only 25%.','Increase enforcement after resolving legitimate senders.'), result('spf','SPF','healthy','Valid policy · 2/10 lookups','One SPF record is published and ends in -all.','Review the policy when senders change.'), aggregateCheck, result('dkim','DKIM','warning','1/2 selectors healthy','legacy: 1024-bit key','Rotate the legacy key.'), result('mta_sts','MTA-STS','healthy','Enforced','Every MX host is covered.','Rotate the DNS id after changes.'), result('tls_rpt','TLS reporting','healthy','1 report destination','Valid TLSRPTv1 policy using mailto.','Review TLS reports.'), smtpService, result('tls_demo','TLS certificate','healthy','64 days remaining','Certificate is trusted.','No action required.',{host:'mail.example.com',port:465,days_remaining:64}), result('bimi','BIMI','ignored','Self-asserted logo · Ignored','No mark certificate is published. This review item is ignored permanently.','No action is required while this exception remains active.',{ignored:true,ignore_mode:'permanent',original_status:'warning'}), result('reputation','IP and domain reputation','healthy','No blocklist matches','Three DNS-blocklist checks completed.','Continue monitoring.',{checks:[]})], { aggregate, failure:{available:false,count:0,period_days:7}, smtp_tls:smtpTls, smtp_diagnostics:smtpService.evidence });
@@ -989,4 +1032,4 @@ const server = http.createServer(async (req,res) => {
 });
 function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`MailPosture listening on :${PORT}`); addDiagnosticEvent('mailposture', 'info', 'MailPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, activeBimiException, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, refresh, getSnapshot:()=>snapshot };
+module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeSmtpProfiles, activeBimiException, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, refresh, getSnapshot:()=>snapshot };

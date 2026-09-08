@@ -21,7 +21,7 @@
   <header>
     <a class="brand" href="/" data-route="/">
       <img src="/mailposture.svg" alt="">
-      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v1.5.0</small></span>
+      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v2.0.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
       <a class="toolbar-button" href="/" data-route="/"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span>Dashboard</span></a>
@@ -116,6 +116,7 @@
         <div class="settings-panel">
           <div><h2>Monitoring behavior</h2><p>Choose how much report history to show and how often MailPosture runs its checks.</p></div>
           <div class="three-fields"><div class="field"><label for="report-days">Report history (days)</label><input id="report-days" type="number" min="1" max="365" required></div><div class="field"><label for="refresh-minutes">Refresh interval (minutes)</label><input id="refresh-minutes" type="number" min="1" max="1440" required></div><div class="field"><label for="request-timeout">Request timeout (milliseconds)</label><input id="request-timeout" type="number" min="1000" max="60000" step="100" required></div></div>
+          <div class="field"><label for="smtp-probe-hostname">SMTP probe hostname</label><input id="smtp-probe-hostname" type="text" placeholder="probe.example.com"><p>Optional. Use a public hostname whose A/AAAA and PTR records identify this MailPosture probe. When blank, MailPosture sends its local address as an SMTP address literal.</p></div>
         </div>
       </section>
 
@@ -203,9 +204,9 @@
         <article><h3>DMARC aggregate reports</h3><p>Shows message volume, separate alignment rates for messages that passed and failed DMARC, stacked daily results, top failing sources, and the receiving services that supplied reports. A failed-message count here does not imply that a matching RUF report exists.</p></article>
         <article><h3>Individual DMARC failure reports (RUF)</h3><p>Counts optional, message-level reports sent by some receiving providers. This count is separate from the failed-message total in aggregate reports. No matching index generally means that no RUF report has arrived, not that ParseDMARC failed. MailPosture does not display message samples because they can contain personal or confidential content.</p></article>
         <article><h3>DKIM</h3><p>Checks each configured selector for a published public key and reports missing, revoked, or weak RSA keys. Selectors must be entered because DNS cannot reliably discover them.</p></article>
-        <article><h3>MTA-STS</h3><p>Checks the DNS signal, HTTPS policy file, policy mode, and whether the policy covers every published MX host.</p></article>
+        <article><h3>MTA-STS</h3><p>Checks the DNS signal, HTTPS policy file, policy mode, whether the policy covers every published MX host, and whether the active SMTP probe can negotiate STARTTLS with a trusted certificate for those hosts.</p></article>
         <article><h3>TLS reporting</h3><p>Looks up <code>_smtp._tls</code>, requires exactly one TLSRPTv1 policy, validates its syntax, and validates each mailto or HTTPS rua destination. It also summarizes stacked SMTP session results, reporting organizations, and failure types from parsedmarc. The values count SMTP sessions, not messages. Processed reports normally move to <code>Archive/SMTP-TLS</code>; MailPosture reads the normalized OpenSearch data.</p></article>
-        <article><h3>SMTP service</h3><p>Tests each published MX host on TCP port 25 for connection and transaction time, reverse DNS, a valid host name, banner alignment, STARTTLS negotiation and certificate trust, and unauthenticated relay protection. MailPosture negotiates STARTTLS before its envelope-only relay probe. Results reflect MailPosture’s network location, and the container must be allowed outbound TCP port 25. If a provider blocks the monitoring source, TLS and relay checks are labeled Not tested rather than failed. The probe uses reserved example addresses and stops before DATA, so it never sends a message.</p></article>
+        <article><h3>SMTP service</h3><p>Tests each published MX host on TCP port 25 for reachability, a valid SMTP greeting, STARTTLS negotiation and certificate trust, and unauthenticated relay protection. Reverse DNS, banner alignment, and single-location timing are supporting diagnostics rather than universal provider requirements. Managed-provider PTR and banner names may legitimately differ from the customer-facing MX name. MailPosture negotiates STARTTLS before its envelope-only relay probe, uses the configured public probe hostname or a local address literal for EHLO, and stops before DATA, so it never sends a message.</p></article>
         <article><h3>TLS certificates</h3><p>Connects to configured direct-TLS endpoints, validates trust, and reports days until expiration. SMTP STARTTLS for published MX hosts is tested separately by SMTP service diagnostics.</p></article>
         <article><h3>BIMI</h3><p>Checks the BIMI record, DMARC prerequisites, HTTPS logo, safe SVG content, and whether a mark certificate URL is published. After validation, the logo appears on the BIMI control card through MailPosture’s same-origin image endpoint. You can independently ignore an intentionally self-asserted logo or intentionally absent logo permanently or for 1–120 months. Invalid records, unsafe logos, and unmet DMARC requirements remain actionable.</p></article>
         <article><h3>IP and domain reputation</h3><p>Screens the monitored domain and its receiving MX addresses against Spamhaus DBL, Spamhaus ZEN, and SpamCop through DNS. It is not a complete reputation score or a deliverability guarantee. Outbound sending services can use different IP addresses and should be checked separately. An unavailable provider is never reported as clean.</p></article>
@@ -234,7 +235,7 @@
         <div><dt>Posture score</dt><dd>A summary indicator weighted by control status. It helps prioritize work but does not replace the evidence shown for each check.</dd></div>
       </dl>
     </section>
-    <section class="help-section safety-note"><h2>What MailPosture changes</h2><p>MailPosture reads public DNS, HTTPS and TLS endpoints, and OpenSearch report data. SMTP diagnostics open a session to each published MX host and send only EHLO, MAIL FROM, RCPT TO, RSET, STARTTLS, and QUIT commands using reserved example addresses; they never send DATA or message content. In the standalone deployment, saving Settings writes parsedmarc’s active configuration, triggers an automatic parsedmarc reload, and manages the OpenSearch snapshot policy. parsedmarc—not MailPosture—moves report messages into its Archive subfolders.</p></section>
+    <section class="help-section safety-note"><h2>What MailPosture changes</h2><p>MailPosture reads public DNS, HTTPS and TLS endpoints, and OpenSearch report data. SMTP diagnostics open a session to each published MX host and send only EHLO, MAIL FROM, RCPT TO, RSET, STARTTLS, and QUIT commands using reserved example addresses; they never send DATA or message content. The EHLO identity is the configured public probe hostname or a local address literal. In the standalone deployment, saving Settings writes parsedmarc’s active configuration, triggers an automatic parsedmarc reload, and manages the OpenSearch snapshot policy. parsedmarc—not MailPosture—moves report messages into its Archive subfolders.</p></section>
   </main>
 
   <dialog id="detail-dialog"><button class="close" type="button" aria-label="Close">×</button><div id="detail"></div></dialog>
@@ -244,6 +245,13 @@
       <button class="close domain-cancel" type="button" aria-label="Close">×</button>
       <div class="editor-heading"><small>Domain configuration</small><h2 id="domain-editor-title">Add domain</h2></div>
       <div class="field"><label for="domain-name">Domain name</label><input id="domain-name" type="text" placeholder="example.com" autocomplete="off" required></div>
+      <section class="editor-section">
+        <div><h3>Mail hosting and SMTP probes</h3><p>Choose who controls the inbound mail servers. Automatic detection recognizes Google Workspace, Microsoft 365, Hover, iCloud Mail, and self-hosted MX names.</p></div>
+        <div class="two-fields"><div class="field"><label for="smtp-hosting-type">Hosting type</label><select id="smtp-hosting-type"><option value="auto">Detect automatically</option><option value="self_hosted">Self-hosted</option><option value="managed">Managed provider</option><option value="no_inbound">Does not receive mail</option></select></div><div class="field"><label for="smtp-provider">Provider</label><select id="smtp-provider"><option value="auto">Detect automatically</option><option value="google">Google Workspace</option><option value="microsoft">Microsoft 365</option><option value="hover">Hover</option><option value="icloud">iCloud Mail</option><option value="other">Other provider</option></select></div></div>
+        <div id="smtp-expected-host-field" class="field"><label for="smtp-expected-host">Expected server identity</label><input id="smtp-expected-host" type="text" placeholder="mail.example.com"><p>Optional for self-hosted services. MailPosture compares the PTR and SMTP banner with this hostname.</p></div>
+        <div class="field"><label for="smtp-relay-context">Probe network location</label><select id="smtp-relay-context"><option value="auto">Not specified</option><option value="external">External and untrusted</option><option value="internal">Internal or trusted</option></select><p>An accepted external recipient is critical only when this installation is known to run outside the mail server’s trusted network.</p></div>
+        <p class="settings-note">Provider selection changes responsibility and recommendations, but it never suppresses definite MX, STARTTLS, certificate, or externally confirmed relay failures.</p>
+      </section>
       <section class="editor-section">
         <div><h3>DKIM selectors</h3><p>Add the selector labels used by this domain’s mail senders.</p></div>
         <div id="selector-list" class="editable-list compact-list"></div>

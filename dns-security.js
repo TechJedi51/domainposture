@@ -92,7 +92,7 @@ async function inspectSpfDomain(domain, resolver, state, depth = 0, path = new S
     const qualifier = /^[+?~-]/.test(allTerms[0]) ? allTerms[0][0] : '+';
     if (qualifier === '+') state.errors.push(`${domain} authorizes every sender with +all.`);
     else if (qualifier === '?') state.errors.push(`${domain} uses ?all, which provides no meaningful authorization boundary.`);
-    else if (qualifier === '~' && depth === 0) state.warnings.push(`${domain} ends in softfail (~all).`);
+    else if (qualifier === '~' && depth === 0) { state.softFail = true; state.warnings.push(`${domain} ends in softfail (~all).`); }
     else if (depth === 0) state.hardFail = true;
   }
   const references = mechanisms.filter(term => mechanismName(term) === 'include').map(mechanismTarget).filter(Boolean);
@@ -122,14 +122,16 @@ async function inspectSpfDomain(domain, resolver, state, depth = 0, path = new S
 
 async function spfCheck(domain, options = {}) {
   const resolver = resolverFor(options);
-  const state = { records: [], errors: [], warnings: [], temporaryErrors: [], lookupCount: 0, hardFail: false, deadline: Date.now() + Number(options.timeout_ms || 8000) };
+  const state = { records: [], errors: [], warnings: [], temporaryErrors: [], lookupCount: 0, hardFail: false, softFail: false, deadline: Date.now() + Number(options.timeout_ms || 8000) };
   await inspectSpfDomain(domain, resolver, state);
   if (state.lookupCount > 10) state.errors.push(`Expanded SPF policy requires at least ${state.lookupCount} DNS-querying terms; the limit is 10.`);
-  const evidence = { records: state.records, dns_lookup_terms: state.lookupCount, hard_fail: state.hardFail, warnings: state.warnings, errors: state.errors, temporary_errors: state.temporaryErrors };
+  const evidence = { records: state.records, dns_lookup_terms: state.lookupCount, hard_fail: state.hardFail, soft_fail: state.softFail, warnings: state.warnings, errors: state.errors, temporary_errors: state.temporaryErrors, mail_profile: options.mail_profile || null };
   if (state.temporaryErrors.length && !state.records.length) return result('spf', 'SPF', 'warning', 'DNS check unavailable', state.temporaryErrors.join(' '), 'Retry the check and verify DNS resolution from the MailPosture container.', evidence);
   if (state.errors.length) return result('spf', 'SPF', 'critical', 'Invalid policy', state.errors.join(' '), 'Correct the SPF record, then run the check again. Keep recursive DNS-querying terms at 10 or fewer.', evidence);
   if (state.temporaryErrors.length) return result('spf', 'SPF', 'warning', 'Validation incomplete', state.temporaryErrors.join(' '), 'Retry the check and verify DNS resolution from the MailPosture container.', evidence);
-  if (state.warnings.length) return result('spf', 'SPF', 'warning', state.hardFail ? 'Valid, with review items' : 'Policy needs review', state.warnings.join(' '), state.hardFail ? 'Review the warnings and confirm every legitimate sender remains authorized.' : 'Move toward -all after confirming every legitimate sender is authorized.', evidence);
+  const hoverSoftFail = state.softFail && state.warnings.length === 1 && options.mail_profile?.hosting_type === 'managed' && options.mail_profile?.provider === 'hover';
+  if (hoverSoftFail) return result('spf', 'SPF', 'info', 'Valid Hover policy · softfail', 'The policy is valid and uses Hover’s documented ~all ending. Changing it independently could reject legitimate provider traffic.', 'Keep the Hover-provided SPF policy unless Hover supplies a replacement. Recheck it when sending services change.', { ...evidence, provider_exception: 'hover_softfail' });
+  if (state.warnings.length) return result('spf', 'SPF', 'warning', state.hardFail ? 'Valid, with review items' : 'Policy needs review', state.warnings.join(' '), state.hardFail ? 'Review the warnings and confirm every legitimate sender remains authorized.' : options.mail_profile?.hosting_type === 'managed' ? 'Confirm the required policy with the mail provider before changing its final qualifier.' : 'Move toward -all after confirming every legitimate sender is authorized.', evidence);
   return result('spf', 'SPF', 'healthy', `Valid policy · ${state.lookupCount}/10 lookups`, 'One SPF record is published, its expanded DNS-querying terms are within the RFC limit, and it ends in -all.', 'Review the policy whenever sending services change.', evidence);
 }
 
