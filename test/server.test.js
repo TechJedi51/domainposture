@@ -42,6 +42,7 @@ async function run(){
   delete process.env.OPENSEARCH_VERIFY_TLS;
   assert.strictEqual(app.settingsConfig(settings).domains[0].report_days,14);
   assert.strictEqual(app.settingsConfig(settings).domains[0].smtp_profile.hosting_type,'self_hosted');
+  assert.strictEqual(app.normalizeSettings({monitored_domains:['example.com'],smtp_profiles:{'example.com':{hosting_type:'self_hosted',provider:'kerio'}}}).smtp_profiles['example.com'].provider,'kerio');
   assert.throws(()=>app.normalizeSettings({monitored_domains:['example.com'],smtp_probe_hostname:'not-a-host'}),/fully qualified/);
   assert.throws(()=>app.normalizeSettings({monitored_domains:['example.com'],smtp_profiles:{'example.com':{expected_hostname:'bad host'}}}),/expected SMTP hostname/);
   assert.throws(()=>app.normalizeSettings({monitored_domains:['not a domain']}),/Invalid monitored domain/);
@@ -92,6 +93,19 @@ async function run(){
   const hoverProfile=app.smtpProfile('seal.fyi',{hosting_type:'auto',provider:'auto'},[{exchange:'mx.hover.com.cust.hostedemail.com'}]);
   assert.strictEqual(hoverProfile.hosting_type,'managed');
   assert.strictEqual(hoverProfile.provider,'hover');
+  assert.strictEqual(hoverProfile.provider_label,'Hover Mail');
+  assert.strictEqual(hoverProfile.hosting_source,'auto_detected');
+  assert.strictEqual(hoverProfile.provider_source,'auto_detected');
+  const icloudProfile=app.smtpProfile('macsupportla.com',{hosting_type:'auto',provider:'auto'},[{exchange:'mx01.mail.icloud.com'},{exchange:'mx02.mail.icloud.com'}]);
+  assert.strictEqual(icloudProfile.hosting_type,'managed');
+  assert.strictEqual(icloudProfile.provider,'icloud');
+  assert.strictEqual(icloudProfile.provider_label,'iCloud Mail');
+  const kerioProfile=app.smtpProfile('sealsystems.net',{hosting_type:'auto',provider:'kerio'},[{exchange:'mail.sealsystems.net'}]);
+  assert.strictEqual(kerioProfile.hosting_type,'self_hosted');
+  assert.strictEqual(kerioProfile.provider,'kerio');
+  assert.strictEqual(kerioProfile.provider_label,'Kerio Connect');
+  assert.strictEqual(kerioProfile.hosting_source,'selected');
+  assert.strictEqual(kerioProfile.provider_source,'selected');
   const spfResolver={resolveTxt:async name=>name==='example.com'?[['v=spf1 include:_spf.example.net -all']]:[['v=spf1 ip4:192.0.2.0/24 -all']]};
   const spf=await app.spfCheck('example.com',{resolver:spfResolver});
   assert.strictEqual(spf.status,'healthy');
@@ -143,6 +157,10 @@ async function run(){
   assert.strictEqual(managedEndpoint.status,'healthy');
   assert.strictEqual(managedEndpoint.tests.find(test=>test.label==='SMTP Reverse DNS').status,'healthy');
   assert.strictEqual(managedEndpoint.tests.find(test=>test.label==='SMTP Banner Check').status,'healthy');
+  const nonstandardIcloudIdentity=app.evaluateSmtpEvidence('mx01.mail.icloud.com',{connection_time_ms:200,transaction_time_ms:400,ip_address:'192.0.2.31',reverse_dns:['nonstandard-name'],forward_confirmed:true,banner:'220 nonstandard greeting',banner_hostname:null,starttls_advertised:true,starttls_negotiated:true,tls_authorized:true,relay_status:'denied',rcpt_to_code:550,transcript:[]},icloudProfile);
+  assert.strictEqual(nonstandardIcloudIdentity.status,'info');
+  assert.strictEqual(nonstandardIcloudIdentity.tests.find(test=>test.label==='SMTP Valid Hostname').status,'info');
+  assert.strictEqual(nonstandardIcloudIdentity.tests.find(test=>test.label==='SMTP Banner Check').status,'info');
   const enforcedSts=app.reconcileMtaSts({id:'mta_sts',label:'MTA-STS',status:'healthy',summary:'Enforced',detail:'One MX host is covered.',evidence:{policy:{mode:'enforce'}}},{evidence:{endpoints:[{host:'mx.example.com',starttls_negotiated:true,tls_authorized:false}]}});
   assert.strictEqual(enforcedSts.status,'critical');
   assert.deepStrictEqual(enforcedSts.evidence.smtp_validation_failed_hosts,['mx.example.com']);
@@ -187,7 +205,7 @@ async function run(){
   assert.strictEqual(shards.all_replicas,true);
   assert.strictEqual(shards.affected_report_shards,0);
   assert.strictEqual(shards.groups.find(group=>group.category==='OpenSearch security audit logs').unassigned_shards,1);
-  process.env.DEMO_MODE='true';const status=await app.refresh();assert.strictEqual(status.domains.length,1);assert.ok(status.summary.critical>0);assert.strictEqual(status.version,require('../package.json').version);
+  process.env.DEMO_MODE='true';const status=await app.refresh();assert.strictEqual(status.domains.length,1);assert.ok(status.summary.critical>0);assert.strictEqual(status.version,require('../package.json').version);assert.strictEqual(status.domains[0].mail_profile.provider,'self_hosted');
   assert.strictEqual(require('../package.json').version,'2.0.0');
   const page=fs.readFileSync('public/index.html','utf8'),client=fs.readFileSync('public/app.js','utf8'),styles=fs.readFileSync('public/settings.css','utf8'),icon=fs.readFileSync('public/mailposture.svg','utf8'),standalone=fs.readFileSync('compose.standalone.yml','utf8'),dockerfile=fs.readFileSync('Dockerfile','utf8'),smtpSource=fs.readFileSync('smtp.js','utf8');
   assert.match(page,/MailPosture/);
@@ -215,6 +233,8 @@ async function run(){
   assert.match(page,/id="smtp-probe-hostname"/);
   assert.match(page,/id="smtp-hosting-type"/);
   assert.match(page,/id="smtp-provider"/);
+  assert.match(page,/Kerio Connect/);
+  assert.match(page,/Hover Mail/);
   assert.match(page,/id="smtp-relay-context"/);
   assert.match(page,/IP and domain reputation/);
   assert.match(page,/Observed email traffic/);

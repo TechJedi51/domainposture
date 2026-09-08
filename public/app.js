@@ -7,6 +7,31 @@ const themeQuery = matchMedia('(prefers-color-scheme: dark)');
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]);
 const clone = value => JSON.parse(JSON.stringify(value));
 const number = value => new Intl.NumberFormat().format(Math.round(Number(value || 0)));
+const hostingLabels = { auto: 'Automatic', self_hosted: 'Self-hosted', managed: 'Managed provider', no_inbound: 'No inbound mail' };
+const providerLabels = { auto: 'Automatic', kerio: 'Kerio Connect', google: 'Google Workspace', microsoft: 'Microsoft 365', hover: 'Hover Mail', icloud: 'iCloud Mail', self_hosted: 'Self-hosted', other: 'Other provider', none: 'None' };
+
+function mailProfileValues(profile = {}) {
+  const requestedHosting = profile.requested_hosting_type || profile.hosting_type || 'auto';
+  const requestedProvider = profile.requested_provider || profile.provider || 'auto';
+  const hostingSource = profile.hosting_source || (requestedHosting === 'auto' ? 'auto_detected' : 'selected');
+  const providerSource = profile.provider_source || (requestedProvider === 'auto' ? 'auto_detected' : 'selected');
+  return {
+    hosting: profile.hosting_type_label || hostingLabels[profile.hosting_type] || 'Unknown',
+    hostingSource: hostingSource === 'selected' ? 'Selected' : 'Auto-detected',
+    provider: profile.provider_label || providerLabels[profile.provider] || 'Unknown',
+    providerSource: providerSource === 'selected' ? 'Selected' : 'Auto-detected'
+  };
+}
+
+function mailProfileText(profile) {
+  const value = mailProfileValues(profile);
+  return `Hosting type: ${value.hosting} (${value.hostingSource}) · Provider: ${value.provider} (${value.providerSource})`;
+}
+
+function mailProfileMarkup(profile) {
+  const value = mailProfileValues(profile);
+  return `<div class="mail-profile-summary"><span><small>Hosting type · ${esc(value.hostingSource)}</small><strong>${esc(value.hosting)}</strong></span><span><small>Provider · ${esc(value.providerSource)}</small><strong>${esc(value.provider)}</strong></span></div>`;
+}
 
 function statusSymbol(status, label = names[status] || status) {
   return `<span class="status-symbol ${esc(status)}" role="img" aria-label="${esc(label)}"></span>`;
@@ -124,8 +149,7 @@ function smtpDiagnosticsCard(report, id = '') {
     return `<section class="smtp-endpoint"><div class="smtp-endpoint-heading"><div><strong>${esc(endpoint.host)}:${number(endpoint.port || 25)}</strong><span>${esc(endpoint.ip_address || 'Address unavailable')}</span></div><span class="state ${esc(endpoint.status)}">${esc(names[endpoint.status] || endpoint.status)}</span></div><div class="smtp-tests">${tests}</div>${transcript}</section>`;
   }).join('');
   const profile = report.profile || {};
-  const profileLabel = profile.hosting_type === 'managed' ? profile.provider_label || 'Managed provider' : profile.hosting_type === 'self_hosted' ? 'Self-hosted' : profile.hosting_type === 'no_inbound' ? 'No inbound mail' : 'Automatic';
-  return `<article${reportId(id)} class="report-card wide"><div class="report-card-header"><div><h3>MX endpoint results</h3><p>Connection, SMTP identity, STARTTLS, and relay protection for each published MX host.</p></div><span class="state info">${esc(profileLabel)}</span></div><p class="report-explanation">PTR and banner names on managed infrastructure may differ from the customer-facing MX name. Slow timing from this single monitoring location is advisory. The relay probe never sends DATA or message content; acceptance is conclusive only from a configured external, untrusted location.</p><div class="smtp-endpoints">${endpointCards}</div></article>`;
+  return `<article${reportId(id)} class="report-card wide"><div class="report-card-header"><div><h3>MX endpoint results</h3><p>Connection, SMTP identity, STARTTLS, and relay protection for each published MX host.</p></div></div>${mailProfileMarkup(profile)}<p class="report-explanation">PTR and banner names on managed infrastructure may differ from the customer-facing MX name. Slow timing from this single monitoring location is advisory. The relay probe never sends DATA or message content; acceptance is conclusive only from a configured external, untrusted location.</p><div class="smtp-endpoints">${endpointCards}</div></article>`;
 }
 
 function detailCards(reports) {
@@ -188,7 +212,7 @@ function renderDashboard() {
   $('#domain-scores').innerHTML = data.domains.map((domain, index) => {
     const value = domainScores[index];
     const ignored = domain.counts.ignored ? ` · ${domain.counts.ignored} ignored` : '';
-    return `<button class="domain-score-card" data-open-domain="${index}"><div class="domain-score-top"><span>${statusSymbol(domain.status)}${esc(domain.domain)}</span><span class="state ${domain.status}">${names[domain.status]}</span></div><strong>${value}</strong><div class="bar"><i style="width:${value}%"></i></div><p>${domain.counts.critical} critical · ${domain.counts.warning} review${ignored}</p></button>`;
+    return `<button class="domain-score-card" data-open-domain="${index}"><div class="domain-score-top"><span>${statusSymbol(domain.status)}${esc(domain.domain)}</span><span class="state ${domain.status}">${names[domain.status]}</span></div><span class="domain-mail-host">${esc(mailProfileText(domain.mail_profile || {}))}</span><strong>${value}</strong><div class="bar"><i style="width:${value}%"></i></div><p>${domain.counts.critical} critical · ${domain.counts.warning} review${ignored}</p></button>`;
   }).join('');
   $('#master-issue-count').textContent = issueCount ? `${issueCount} open` : 'Clear';
   $('#master-attention').innerHTML = issueCount ? data.domains.map((domain, domainIndex) => {
@@ -225,7 +249,7 @@ function renderDomain() {
   const issues = issuesFor(domain);
   const posture = score(domain);
   const issueHeading = domain.counts.critical ? `${domain.counts.critical} issue${domain.counts.critical === 1 ? ' needs' : 's need'} attention.` : domain.counts.warning ? 'Protected, with room to improve.' : 'Mail controls look solid.';
-  $('#hero').innerHTML = `<div><small>${esc(domain.domain)} · Current posture</small><h1>${issueHeading}</h1><p>Live policy checks and observed authentication results, translated into the next useful action.</p></div><div class="score"><span class="score-watermark status-symbol ${esc(domain.status)}" aria-hidden="true"></span><div class="score-content"><strong>${posture}</strong><span>Posture score out of 100</span><div class="bar"><i style="width:${posture}%"></i></div></div></div>`;
+  $('#hero').innerHTML = `<div><small>${esc(domain.domain)} · Current posture</small><h1>${issueHeading}</h1><p>Live policy checks and observed authentication results, translated into the next useful action.</p>${mailProfileMarkup(domain.mail_profile || {})}</div><div class="score"><span class="score-watermark status-symbol ${esc(domain.status)}" aria-hidden="true"></span><div class="score-content"><strong>${posture}</strong><span>Posture score out of 100</span><div class="bar"><i style="width:${posture}%"></i></div></div></div>`;
   $('#domain-issue-count').textContent = issues.length ? `${issues.length} open` : 'Clear';
   $('#attention').innerHTML = issues.length ? issues.map(check => `<article class="issue ${check.status}"><span class="issue-status">${statusSymbol(check.status)}</span><span class="control">${esc(check.label)}</span><div><h3>${esc(check.summary)}</h3><p>${esc(check.action)}</p></div><button class="view" data-check="${esc(check.id)}">View →</button></article>`).join('') : '<div class="clear">No immediate actions. Every configured control passed its threshold.</div>';
   renderDomainMenu();
@@ -394,9 +418,8 @@ function renderSettingsDomains() {
     const exceptions = [configured.self_asserted || (configured.mode ? configured : null), configured.no_logo].filter(value => value?.mode);
     const active = exceptions.filter(value => value.mode === 'permanent' || (value.mode === 'until' && new Date(value.expires_at) > new Date()));
     const bimiNote = active.length ? ` · ${active.length} BIMI review exception${active.length === 1 ? '' : 's'}` : '';
-    const hostingLabels = { auto: 'Auto-detect hosting', self_hosted: 'Self-hosted', managed: 'Managed provider', no_inbound: 'No inbound mail' };
-    const providerLabels = { google: 'Google Workspace', microsoft: 'Microsoft 365', hover: 'Hover', icloud: 'iCloud Mail', other: 'Other provider' };
-    const mailNote = smtpProfile.hosting_type === 'managed' && smtpProfile.provider !== 'auto' ? providerLabels[smtpProfile.provider] : hostingLabels[smtpProfile.hosting_type] || hostingLabels.auto;
+    const detectedProfile = state.data?.domains?.find(item => item.domain === domain)?.mail_profile;
+    const mailNote = detectedProfile ? mailProfileText(detectedProfile) : `Hosting type: ${hostingLabels[smtpProfile.hosting_type] || 'Automatic'} (${smtpProfile.hosting_type === 'auto' ? 'Auto-detected' : 'Selected'}) · Provider: ${providerLabels[smtpProfile.provider] || 'Automatic'} (${smtpProfile.provider === 'auto' ? 'Auto-detected' : 'Selected'})`;
     return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${esc(mailNote)} · ${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} TLS certificate${endpoints.length === 1 ? '' : 's'}${esc(bimiNote)}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
   }).join('') : '<div class="empty-list"><p>No domains are configured.</p><button type="button" data-add-domain>Add a domain</button></div>';
 }
@@ -539,7 +562,7 @@ function openDomainEditor(index = null) {
 
 function updateMailHostingFields() {
   const type = $('#smtp-hosting-type').value;
-  $('#smtp-provider').disabled = ['self_hosted', 'no_inbound'].includes(type);
+  $('#smtp-provider').disabled = type === 'no_inbound';
   $('#smtp-expected-host-field').hidden = type === 'no_inbound';
 }
 

@@ -9,7 +9,8 @@ const CONNECTION_WARNING_MS = 5000;
 const CONNECTION_CRITICAL_MS = 15000;
 const TRANSACTION_WARNING_MS = 5000;
 const TRANSACTION_CRITICAL_MS = 15000;
-const PROVIDER_LABELS = { google: 'Google Workspace', microsoft: 'Microsoft 365', hover: 'Hover', icloud: 'iCloud Mail', other: 'Other managed provider' };
+const PROVIDER_LABELS = { kerio: 'Kerio Connect', google: 'Google Workspace', microsoft: 'Microsoft 365', hover: 'Hover Mail', icloud: 'iCloud Mail', self_hosted: 'Self-hosted', other: 'Other provider', none: 'None' };
+const PROVIDERS = new Set(['auto', 'kerio', 'google', 'microsoft', 'hover', 'icloud', 'self_hosted', 'other']);
 
 function normalizedHost(value) {
   return String(value || '').trim().toLowerCase().replace(/\.$/, '');
@@ -34,22 +35,34 @@ function detectedProvider(mxRecords = []) {
 
 function smtpProfile(domain, configured = {}, mxRecords = []) {
   const requestedHosting = ['auto', 'self_hosted', 'managed', 'no_inbound'].includes(configured.hosting_type) ? configured.hosting_type : 'auto';
-  const requestedProvider = ['auto', 'google', 'microsoft', 'hover', 'icloud', 'other'].includes(configured.provider) ? configured.provider : 'auto';
-  const provider = requestedProvider === 'auto' ? detectedProvider(mxRecords) : requestedProvider;
+  const requestedProvider = PROVIDERS.has(configured.provider) ? configured.provider : 'auto';
+  const detected = detectedProvider(mxRecords);
   const domainHost = normalizedHost(domain);
   const ownMx = mxRecords.length > 0 && mxRecords.every(record => {
     const host = normalizedHost(record.exchange);
     return host === domainHost || host.endsWith(`.${domainHost}`);
   });
-  const hostingType = requestedHosting === 'auto' ? (provider !== 'other' || !ownMx ? 'managed' : 'self_hosted') : requestedHosting;
+  const detectedHosting = detected !== 'other' || !ownMx ? 'managed' : 'self_hosted';
+  const selectedProviderHosting = ['kerio', 'self_hosted'].includes(requestedProvider) ? 'self_hosted' : requestedProvider === 'auto' ? null : 'managed';
+  const hostingType = requestedHosting === 'auto' ? selectedProviderHosting || detectedHosting : requestedHosting;
+  const provider = hostingType === 'no_inbound'
+    ? 'none'
+    : requestedProvider !== 'auto'
+      ? requestedProvider
+      : hostingType === 'self_hosted'
+        ? 'self_hosted'
+        : detected;
   const relayContext = ['auto', 'external', 'internal'].includes(configured.relay_context) ? configured.relay_context : 'auto';
   const expectedHostname = validHostname(configured.expected_hostname) ? normalizedHost(configured.expected_hostname) : null;
   return {
     requested_hosting_type: requestedHosting,
     hosting_type: hostingType,
+    hosting_type_label: hostingType === 'managed' ? 'Managed provider' : hostingType === 'self_hosted' ? 'Self-hosted' : hostingType === 'no_inbound' ? 'No inbound mail' : 'Automatic',
+    hosting_source: requestedHosting === 'auto' && requestedProvider === 'auto' ? 'auto_detected' : 'selected',
     requested_provider: requestedProvider,
-    provider: hostingType === 'managed' ? provider : 'other',
-    provider_label: hostingType === 'managed' ? PROVIDER_LABELS[provider] : hostingType === 'self_hosted' ? 'Self-hosted' : 'No inbound mail',
+    provider: provider,
+    provider_label: PROVIDER_LABELS[provider] || PROVIDER_LABELS.other,
+    provider_source: requestedProvider === 'auto' ? 'auto_detected' : 'selected',
     expected_hostname: expectedHostname,
     relay_context: relayContext
   };
@@ -331,7 +344,7 @@ function evaluateSmtpEvidence(host, evidence, configuredProfile = {}) {
   const bannerValid = Boolean(evidence.banner_hostname) || /^220[- ]\[(?:IPv6:)?[^\]]+\]/i.test(evidence.banner || '');
   const bannerAligned = Boolean(evidence.banner_hostname && (evidence.banner_hostname === expectedHostname || evidence.reverse_dns?.includes(evidence.banner_hostname)));
   const bannerTest = !bannerValid
-    ? { label: 'SMTP Banner Check', status: 'warning', value: 'Review — Invalid server identity', detail: `The SMTP greeting did not contain a valid hostname or address literal: ${evidence.banner || 'not available'}.` }
+    ? { label: 'SMTP Banner Check', status: managed ? 'info' : 'warning', value: managed ? 'Advisory — Provider greeting identity is nonstandard' : 'Review — Invalid server identity', detail: `The SMTP greeting did not contain a valid hostname or address literal: ${evidence.banner || 'not available'}.${managed ? ' The managed provider controls this identity; STARTTLS and certificate validation remain the security checks.' : ''}` }
     : managed || bannerAligned
       ? { label: 'SMTP Banner Check', status: 'healthy', value: managed && !bannerAligned ? 'OK — Valid provider SMTP identity' : 'OK — Valid and aligned SMTP identity', detail: managed && !bannerAligned ? `Banner host ${evidence.banner_hostname || 'address literal'} is valid. A shared provider banner does not need to equal the customer-facing MX name.` : `Banner host: ${evidence.banner_hostname || 'address literal'}.` }
       : { label: 'SMTP Banner Check', status: 'warning', value: 'Review — Banner differs from expected identity', detail: `Banner host: ${evidence.banner_hostname}; expected ${expectedHostname} or a forward-confirmed PTR name.` };
@@ -345,7 +358,7 @@ function evaluateSmtpEvidence(host, evidence, configuredProfile = {}) {
     { label: 'SMTP TLS', status: evidence.policy_blocked && !evidence.starttls_negotiated ? 'info' : evidence.starttls_negotiated && evidence.tls_authorized ? 'healthy' : evidence.starttls_negotiated ? 'warning' : 'critical', value: evidence.policy_blocked && !evidence.starttls_negotiated ? 'Not tested — Server policy blocked the probe' : evidence.starttls_negotiated ? evidence.tls_authorized ? 'OK — STARTTLS negotiated with a trusted certificate' : 'Review — STARTTLS certificate is not trusted' : 'Failed — STARTTLS was not negotiated', detail: evidence.policy_blocked && !evidence.starttls_negotiated ? `${blockedDetail} This does not demonstrate a TLS failure for other senders.` : evidence.starttls_negotiated ? `${evidence.tls_protocol || 'TLS'}${evidence.tls_cipher ? ` using ${evidence.tls_cipher}` : ''}${evidence.tls_authorization_error ? `; ${evidence.tls_authorization_error}` : ''}.` : evidence.starttls_advertised ? `The server advertised STARTTLS but negotiation failed${evidence.error ? `: ${evidence.error}` : '.'}` : 'The server did not advertise STARTTLS.' },
     { label: 'SMTP Open Relay', status: evidence.policy_blocked ? 'info' : evidence.relay_status === 'denied' ? 'healthy' : evidence.relay_status === 'potential' && profile.relay_context === 'external' ? 'critical' : evidence.relay_status === 'potential' && profile.relay_context === 'internal' ? 'info' : 'warning', value: evidence.policy_blocked ? 'Not tested — Server policy blocked the probe' : evidence.relay_status === 'denied' ? 'OK — Relay attempt denied' : evidence.relay_status === 'potential' && profile.relay_context === 'external' ? 'Failed — External relay recipient accepted' : evidence.relay_status === 'potential' ? 'External verification required — Recipient accepted' : 'Inconclusive', detail: evidence.policy_blocked ? `${blockedDetail} The external-recipient command was not reached. No DATA command or message content was sent.` : evidence.relay_status === 'potential' ? `The server accepted an unauthenticated recipient outside the tested domain from MailPosture’s ${profile.relay_context === 'external' ? 'configured external, untrusted' : profile.relay_context === 'internal' ? 'configured internal, trusted' : 'current'} network location. ${profile.relay_context === 'external' ? 'Restrict unauthenticated relaying immediately.' : 'This does not prove that the service relays from the public internet.'} No DATA command or message content was sent.` : evidence.relay_status === 'denied' ? `The external recipient was rejected with SMTP ${evidence.rcpt_to_code}.` : 'The server did not reach a definitive external-recipient decision. No DATA command or message content was sent.' }
   ];
-  if (managed && tests[3].status === 'warning' && !ptr) tests[3] = { ...tests[3], status: 'info', value: 'Advisory — Provider PTR unavailable', detail: 'A reverse-DNS hostname was not available from this location. The managed provider controls the SMTP server identity.' };
+  if (managed && tests[3].status === 'warning') tests[3] = { ...tests[3], status: 'info', value: ptr ? 'Advisory — Provider PTR hostname is nonstandard' : 'Advisory — Provider PTR unavailable', detail: ptr ? `${ptr} is provider-controlled and does not affect MX routing or certificate validation.` : 'A reverse-DNS hostname was not available from this location. The managed provider controls the SMTP server identity.' };
   if (evidence.error && !evidence.greeting_code) {
     tests[0] = { label: 'SMTP Connection Time', status: 'critical', value: 'Connection failed', detail: evidence.error };
     tests[1] = { label: 'SMTP Transaction Time', status: 'info', value: 'Not run', detail: 'The SMTP transaction could not start because the greeting was not received.' };

@@ -34,7 +34,9 @@ After the first deployment, select the gear button in MailPosture. The Monitored
 
 ### Domains
 
-Select the plus button to add a domain. Use the edit button beside a domain to change its name; select its inbound-mail hosting type and provider; identify whether relay probes run from a trusted or external network; or manage its DKIM selectors and TLS certificate endpoints. Automatic provider detection recognizes Google Workspace, Microsoft 365, Hover, iCloud Mail, and self-hosted MX names. Domain removal remains pending until **Save settings** is selected.
+Select the plus button to add a domain. Use the edit button beside a domain to change its name; select its inbound-mail hosting type and provider; identify whether relay probes run from a trusted or external network; or manage its DKIM selectors and TLS certificate endpoints. Automatic provider detection recognizes Google Workspace, Microsoft 365, Hover Mail, iCloud Mail, and self-hosted MX names. Kerio Connect can be selected for a self-hosted domain because its product identity cannot be determined reliably from public DNS. Domain removal remains pending until **Save settings** is selected.
+
+The domain dashboard, domain cards, Settings list, and SMTP diagnostics show the effective hosting type and provider. Each value is labeled **Auto-detected** or **Selected** so operators can distinguish DNS-derived classification from an explicit configuration choice.
 
 Add every domain that appears after the `@` in an organization-managed From address.
 
