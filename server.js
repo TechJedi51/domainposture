@@ -209,6 +209,29 @@ function normalizeBimiExceptions(input = {}, monitoredDomains = []) {
   return output;
 }
 
+function normalizeControlExceptions(input = {}, monitoredDomains = []) {
+  const output = {};
+  const normalizedException = (rawException, domain, label) => {
+    const exception = rawException || {};
+    if (exception.mode === 'permanent') return { mode: 'permanent' };
+    if (exception.mode === 'until') {
+      const timestamp = Date.parse(exception.expires_at);
+      if (!Number.isFinite(timestamp)) throw new Error(`Invalid ${label} exception expiration for ${domain}`);
+      return { mode: 'until', expires_at: new Date(timestamp).toISOString() };
+    }
+    return null;
+  };
+  for (const [rawDomain, rawExceptions] of Object.entries(input || {})) {
+    const domain = String(rawDomain).trim().toLowerCase().replace(/\.$/, '');
+    if (!validDomain(domain) || !monitoredDomains.includes(domain)) continue;
+    const exceptions = rawExceptions || {};
+    const mtaSts = normalizedException(exceptions.mta_sts, domain, 'MTA-STS');
+    const tlsCertificates = normalizedException(exceptions.tls_certificates, domain, 'TLS certificate');
+    if (mtaSts || tlsCertificates) output[domain] = { ...(mtaSts ? { mta_sts: mtaSts } : {}), ...(tlsCertificates ? { tls_certificates: tlsCertificates } : {}) };
+  }
+  return output;
+}
+
 function normalizeSmtpProfiles(input = {}, monitoredDomains = []) {
   const output = {};
   for (const [rawDomain, rawProfile] of Object.entries(input || {})) {
@@ -232,6 +255,16 @@ function activeBimiException(exception, now = Date.now()) {
     if (Number.isFinite(timestamp) && timestamp > now) return { active: true, mode: 'until', expires_at: new Date(timestamp).toISOString(), label: `until ${new Date(timestamp).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' })}` };
   }
   return { active: false };
+}
+
+function applyMissingControlException(check, exception, reason) {
+  const ignored = activeBimiException(exception);
+  if (!ignored.active) return check;
+  return result(check.id, check.label, 'ignored', `${check.summary} · Ignored`, `${check.detail} This review item is ignored ${ignored.label}.`, 'No action is required while this exception remains active. Edit the domain to change or remove it.', { ...check.evidence, ignored: true, ignore_reason: reason, ignore_mode: ignored.mode, ignored_until: ignored.expires_at || null, original_status: check.status });
+}
+
+function isMissingMtaSts(check) {
+  return check?.summary === 'Not configured' && Array.isArray(check?.evidence?.raw_dns) && check.evidence.raw_dns.length === 0;
 }
 
 function normalizeSettings(input = {}) {
@@ -275,13 +308,14 @@ function normalizeSettings(input = {}) {
   const smtpProbeHostname = textValue(input.smtp_probe_hostname, process.env.SMTP_PROBE_HOSTNAME || '', 253).toLowerCase().replace(/\.$/, '');
   if (smtpProbeHostname && !validDomain(smtpProbeHostname)) throw new Error('SMTP probe hostname must be a fully qualified domain name');
   return {
-    schema_version: 6,
+    schema_version: 7,
     monitored_domains: domains,
     dkim_selectors: selectors,
     tls_endpoints: endpoints,
     smtp_profiles: normalizeSmtpProfiles(input.smtp_profiles, domains),
     smtp_probe_hostname: smtpProbeHostname,
     bimi_exceptions: normalizeBimiExceptions(input.bimi_exceptions, domains),
+    control_exceptions: normalizeControlExceptions(input.control_exceptions, domains),
     report_days: boundedNumber(input.report_days, 7, 1, 365, 'Report days'),
     refresh_minutes: boundedNumber(input.refresh_minutes, 15, 1, 1440, 'Refresh minutes'),
     request_timeout_ms: boundedNumber(input.request_timeout_ms, 8000, 1000, 60000, 'Request timeout'),
@@ -476,6 +510,7 @@ function settingsConfig(settings = getSettings()) {
       tls_endpoints: settings.tls_endpoints[domain] || [],
       smtp_profile: settings.smtp_profiles[domain] || { hosting_type: 'auto', provider: 'auto', expected_hostname: '', relay_context: 'auto' },
       bimi_exception: settings.bimi_exceptions[domain] || null,
+      control_exception: settings.control_exceptions[domain] || null,
       report_days: settings.report_days
     }))
   };
@@ -702,7 +737,7 @@ function mxMatch(host, pattern) { const h = host.toLowerCase().replace(/\.$/, ''
 async function mtaSts(domain) {
   const evidence = {};
   try {
-    const records = protocol(await txt(`_mta-sts.${domain}`), 'v=STSv1'); evidence.dns = records;
+    const rawRecords = await txt(`_mta-sts.${domain}`); const records = protocol(rawRecords, 'v=STSv1'); evidence.raw_dns = rawRecords; evidence.dns = records;
     if (records.length !== 1) return result('mta_sts', 'MTA-STS', 'critical', 'Not configured', 'Expected exactly one STSv1 DNS signal.', 'Publish the DNS signal and a valid HTTPS policy.', evidence);
     const response = await get(`https://mta-sts.${domain}/.well-known/mta-sts.txt`, 65536); evidence.http_status = response.status;
     if (response.status !== 200) return result('mta_sts', 'MTA-STS', 'critical', `Policy returned HTTP ${response.status}`, 'Senders require a successful policy fetch.', 'Serve the policy at the exact well-known path.', evidence);
@@ -712,7 +747,10 @@ async function mtaSts(domain) {
     if (uncovered.length) return result('mta_sts', 'MTA-STS', 'critical', 'MX hosts not covered', uncovered.join(', '), 'Add every active mail exchanger to the policy.', evidence);
     if (policy.mode !== 'enforce') return result('mta_sts', 'MTA-STS', 'warning', `${policy.mode} mode`, 'Authenticated TLS is not yet required.', 'Review TLS reports, change to enforce, and rotate the DNS id.', evidence);
     return result('mta_sts', 'MTA-STS', 'healthy', 'Enforced', `${mx.length} MX host(s) covered.`, 'Rotate the DNS id whenever the policy changes.', evidence);
-  } catch (error) { return result('mta_sts', 'MTA-STS', 'critical', 'Check failed', error.message, 'Verify DNS, HTTPS, and the policy endpoint.', evidence); }
+  } catch (error) {
+    if (!evidence.raw_dns && ['ENOTFOUND', 'ENODATA', 'EAI_NONAME'].includes(error.code)) return result('mta_sts', 'MTA-STS', 'critical', 'Not configured', 'No STSv1 DNS signal is published.', 'Publish the DNS signal and a valid HTTPS policy, or ignore an intentionally absent MTA-STS configuration in the domain settings.', { raw_dns: [], dns: [] });
+    return result('mta_sts', 'MTA-STS', 'critical', 'Check failed', error.message, 'Verify DNS, HTTPS, and the policy endpoint.', evidence);
+  }
 }
 
 async function bimi(domain, dmarcResult, configuredException = null, options = {}) {
@@ -976,8 +1014,13 @@ async function checkDomain(entry, config) {
   const noInbound = mailProfile.hosting_type === 'no_inbound';
   const notApplicable = (id, label) => result(id, label, 'info', 'Not applicable', 'This domain is configured not to receive inbound email.', 'No action required while inbound mail remains disabled.', { mail_profile: mailProfile });
   const dm = await dmarc(entry.domain); const [senderPolicy, stsResult, tlsreport, smtpService, brand, keys, aggregate, failures, smtpTls, reputation, ...certs] = await Promise.all([spfCheck(entry.domain, { timeout_ms: requestTimeoutMs, mail_profile: mailProfile }), noInbound ? Promise.resolve(notApplicable('mta_sts', 'MTA-STS')) : mtaSts(entry.domain), noInbound ? Promise.resolve(notApplicable('tls_rpt', 'TLS reporting')) : tlsRptCheck(entry.domain, { timeout_ms: requestTimeoutMs }), smtpDiagnostics(entry.domain, { timeout_ms: requestTimeoutMs, profile: mailProfile, ehlo_hostname: config.smtp_probe_hostname }), bimi(entry.domain, dm, entry.bimi_exception), dkim(entry.domain, entry.dkim_selectors, mailProfile), reports(entry.domain, config.opensearch, entry.report_days), failureReports(entry.domain, config.opensearch, entry.report_days), smtpTlsReports(entry.domain, config.opensearch, entry.report_days), reputationCheck(entry.domain, { timeout_ms: requestTimeoutMs }), ...entry.tls_endpoints.map(certificate)]);
-  const sts = reconcileMtaSts(stsResult, smtpService);
-  if (!certs.length) certs.push(noInbound ? notApplicable('tls_config', 'TLS certificate') : result('tls_config', 'TLS certificate', 'warning', 'No endpoints configured', 'No certificate endpoints are configured for this domain.', 'Add a TLS endpoint for this domain in Settings.', { domain: entry.domain, host: entry.domain, port: null }));
+  let sts = reconcileMtaSts(stsResult, smtpService);
+  if (!noInbound && isMissingMtaSts(sts)) sts = applyMissingControlException(sts, entry.control_exception?.mta_sts, 'mta_sts_absent');
+  if (!certs.length) {
+    let certificateConfiguration = noInbound ? notApplicable('tls_config', 'TLS certificate') : result('tls_config', 'TLS certificate', 'warning', 'No endpoints configured', 'No certificate endpoints are configured for this domain.', 'Add a TLS endpoint for this domain in Settings, or ignore intentionally absent certificate monitoring.', { domain: entry.domain, host: entry.domain, port: null });
+    if (!noInbound) certificateConfiguration = applyMissingControlException(certificateConfiguration, entry.control_exception?.tls_certificates, 'tls_certificates_absent');
+    certs.push(certificateConfiguration);
+  }
   return summarize(entry.domain, [dm, senderPolicy, aggregate, keys, sts, tlsreport, smtpService, ...certs, brand, reputation], { aggregate: aggregate.evidence || {}, failure: failures, smtp_tls: smtpTls, smtp_diagnostics: smtpService.evidence || {} }, { mail_profile: mailProfile });
 }
 function demo() {
@@ -1032,4 +1075,4 @@ const server = http.createServer(async (req,res) => {
 });
 function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`MailPosture listening on :${PORT}`); addDiagnosticEvent('mailposture', 'info', 'MailPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeSmtpProfiles, activeBimiException, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, refresh, getSnapshot:()=>snapshot };
+module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeControlExceptions, normalizeSmtpProfiles, activeBimiException, applyMissingControlException, isMissingMtaSts, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, refresh, getSnapshot:()=>snapshot };

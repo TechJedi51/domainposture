@@ -15,7 +15,7 @@ async function run(){
   assert.deepStrictEqual(settings.monitored_domains,['example.com']);
   assert.strictEqual(settings.opensearch_enabled,true);
   assert.strictEqual(settings.report_source,'standalone');
-  assert.strictEqual(settings.schema_version,6);
+  assert.strictEqual(settings.schema_version,7);
   assert.strictEqual(settings.smtp_probe_hostname,'probe.example.com');
   assert.deepStrictEqual(settings.smtp_profiles['example.com'],{hosting_type:'self_hosted',provider:'auto',expected_hostname:'mail.example.com',relay_context:'external'});
   assert.strictEqual(settings.mailbox.archive_folder,'Archive');
@@ -34,6 +34,18 @@ async function run(){
   assert.strictEqual(app.activeBimiException({mode:'until',expires_at:'2099-01-01T00:00:00.000Z'},Date.parse('2026-01-01T00:00:00.000Z')).active,true);
   assert.strictEqual(app.activeBimiException({mode:'until',expires_at:'2025-01-01T00:00:00.000Z'},Date.parse('2026-01-01T00:00:00.000Z')).active,false);
   assert.throws(()=>app.normalizeSettings({monitored_domains:['example.com'],bimi_exceptions:{'example.com':{mode:'until',expires_at:'not-a-date'}}}),/Invalid BIMI .*exception expiration/);
+  const controlSettings=app.normalizeSettings({monitored_domains:['example.com'],control_exceptions:{'example.com':{mta_sts:{mode:'permanent'},tls_certificates:{mode:'until',expires_at:'2099-01-01T00:00:00.000Z'}},'other.example':{mta_sts:{mode:'permanent'}}}});
+  assert.deepStrictEqual(controlSettings.control_exceptions,{'example.com':{mta_sts:{mode:'permanent'},tls_certificates:{mode:'until',expires_at:'2099-01-01T00:00:00.000Z'}}});
+  assert.deepStrictEqual(app.settingsConfig(controlSettings).domains[0].control_exception,controlSettings.control_exceptions['example.com']);
+  assert.throws(()=>app.normalizeSettings({monitored_domains:['example.com'],control_exceptions:{'example.com':{mta_sts:{mode:'until',expires_at:'not-a-date'}}}}),/Invalid MTA-STS exception expiration/);
+  const missingMta={id:'mta_sts',label:'MTA-STS',status:'critical',summary:'Not configured',detail:'No STSv1 DNS signal is published.',action:'Publish a policy.',evidence:{raw_dns:[],dns:[]}};
+  assert.strictEqual(app.isMissingMtaSts(missingMta),true);
+  assert.strictEqual(app.isMissingMtaSts({...missingMta,evidence:{raw_dns:['invalid policy'],dns:[]}}),false);
+  const ignoredMta=app.applyMissingControlException(missingMta,{mode:'permanent'},'mta_sts_absent');
+  assert.strictEqual(ignoredMta.status,'ignored');
+  assert.strictEqual(ignoredMta.evidence.original_status,'critical');
+  assert.strictEqual(ignoredMta.evidence.ignore_reason,'mta_sts_absent');
+  assert.strictEqual(app.applyMissingControlException(missingMta,{mode:'until',expires_at:'2025-01-01T00:00:00.000Z'}).status,'critical');
   const ignoredSummary=app.summarize('example.com',[{status:'healthy'},{status:'ignored'}]);
   assert.strictEqual(ignoredSummary.status,'healthy');
   assert.strictEqual(ignoredSummary.counts.ignored,1);
@@ -206,7 +218,7 @@ async function run(){
   assert.strictEqual(shards.affected_report_shards,0);
   assert.strictEqual(shards.groups.find(group=>group.category==='OpenSearch security audit logs').unassigned_shards,1);
   process.env.DEMO_MODE='true';const status=await app.refresh();assert.strictEqual(status.domains.length,1);assert.ok(status.summary.critical>0);assert.strictEqual(status.version,require('../package.json').version);assert.strictEqual(status.domains[0].mail_profile.provider,'self_hosted');
-  assert.strictEqual(require('../package.json').version,'2.1.0');
+  assert.strictEqual(require('../package.json').version,'2.2.0');
   const page=fs.readFileSync('public/index.html','utf8'),client=fs.readFileSync('public/app.js','utf8'),styles=fs.readFileSync('public/settings.css','utf8'),icon=fs.readFileSync('public/mailposture.svg','utf8'),standalone=fs.readFileSync('compose.standalone.yml','utf8'),dockerfile=fs.readFileSync('Dockerfile','utf8'),smtpSource=fs.readFileSync('smtp.js','utf8');
   assert.match(page,/MailPosture/);
   assert.match(page,/id="dashboard-view"/);
@@ -216,7 +228,7 @@ async function run(){
   assert.match(page,/id="log-service"/);
   assert.match(page,/id="service-log"/);
   assert.match(page,/id="service-log-service"/);
-  assert.match(page,/v2\.1\.0/);
+  assert.match(page,/v2\.2\.0/);
   assert.match(page,/Mail Security Dashboard/);
   assert.doesNotMatch(page,/DMARC authentication and SMTP TLS delivery results for the selected history window/);
   assert.match(page,/id="domain-menu-button"/);
@@ -230,6 +242,10 @@ async function run(){
   assert.match(page,/id="bimi-ignore-months"/);
   assert.match(page,/id="bimi-no-logo-ignore-mode"/);
   assert.match(page,/id="bimi-no-logo-ignore-months"/);
+  assert.match(page,/id="mta-sts-ignore-mode"/);
+  assert.match(page,/id="mta-sts-ignore-months"/);
+  assert.match(page,/id="tls-certificates-ignore-mode"/);
+  assert.match(page,/id="tls-certificates-ignore-months"/);
   assert.match(page,/id="smtp-probe-hostname"/);
   assert.match(page,/id="smtp-hosting-type"/);
   assert.match(page,/id="smtp-provider"/);
@@ -280,6 +296,8 @@ async function run(){
   assert.match(client,/api\/bimi-logo/);
   assert.match(client,/bimi_exceptions/);
   assert.match(client,/bimiExceptionDirty/);
+  assert.match(client,/control_exceptions/);
+  assert.match(client,/controlExceptionDirty/);
   assert.match(client,/dmarcReportersCard/);
   assert.match(client,/passed_dkim_aligned_rate/);
   assert.match(client,/hasFailures/);

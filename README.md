@@ -93,6 +93,8 @@ Top failing DMARC sources include the source IP address and, when available, par
 
 When BIMI publishes a safe SVG logo over HTTPS and passes validation, MailPosture displays it on the BIMI control card through a same-origin, sandboxed image response. Remote logo markup is not inserted into the page. A domain editor can independently ignore an intentionally self-asserted logo or intentionally absent logo permanently or for 1–120 months. The BIMI card remains visible and labeled **Ignored**; invalid records, unsafe logos, and unmet DMARC prerequisites are never suppressed.
 
+The domain editor can also ignore intentionally absent MTA-STS and TLS certificate monitoring permanently or for 1–120 months. These controls remain visible and labeled **Ignored**, are removed from the attention queue, and do not lower the posture score. The MTA-STS exception applies only when no STSv1 DNS signal exists; partial or invalid policies remain actionable. The TLS certificate exception applies only when no certificate endpoints are configured; failures, trust errors, and expiration warnings from configured endpoints remain actionable.
+
 The parsedmarc tab manages the general, mailbox, IMAP, and OpenSearch options used by the bundled IMAP-to-OpenSearch pipeline. Monthly indexes are enabled by default for new configurations to avoid creating a large number of small report indexes. For a single OpenSearch node, use one shard and zero replicas. Less common outputs and collectors, including Kafka, S3, Splunk, Gmail API, and Microsoft Graph, remain advanced file-based configuration. MailPosture does not parse, move, or delete report messages itself; parsedmarc performs the configured mailbox actions.
 
 ### System Status troubleshooting
@@ -152,7 +154,7 @@ The first push to `main` starts **Test and publish container image** under the r
 - builds `linux/amd64` and `linux/arm64` images;
 - publishes `ghcr.io/OWNER/REPOSITORY:latest`;
 - also publishes an immutable `sha-...` tag;
-- publishes version tags when a tag such as `v2.1.0` is pushed.
+- publishes version tags when a tag such as `v2.2.0` is pushed.
 
 No registry password is required in the workflow. GitHub's temporary `GITHUB_TOKEN` publishes the image to the repository's GHCR package.
 
@@ -226,7 +228,7 @@ MailPosture uses semantic versioning:
 - Features increment the second number and reset the third number to zero, such as `1.2.1` to `1.3.0`.
 - Incompatible changes increment the first number.
 
-This feature release is version `2.1.0`.
+This feature release is version `2.2.0`.
 
 ## 5. Reverse proxy
 

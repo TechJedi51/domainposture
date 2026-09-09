@@ -416,11 +416,12 @@ function renderSettingsDomains() {
     const smtpProfile = settings.smtp_profiles?.[domain] || { hosting_type: 'auto', provider: 'auto' };
     const configured = settings.bimi_exceptions?.[domain] || {};
     const exceptions = [configured.self_asserted || (configured.mode ? configured : null), configured.no_logo].filter(value => value?.mode);
-    const active = exceptions.filter(value => value.mode === 'permanent' || (value.mode === 'until' && new Date(value.expires_at) > new Date()));
-    const bimiNote = active.length ? ` · ${active.length} BIMI review exception${active.length === 1 ? '' : 's'}` : '';
+    const controlExceptions = Object.values(settings.control_exceptions?.[domain] || {}).filter(value => value?.mode);
+    const active = [...exceptions, ...controlExceptions].filter(value => value.mode === 'permanent' || (value.mode === 'until' && new Date(value.expires_at) > new Date()));
+    const exceptionNote = active.length ? ` · ${active.length} review exception${active.length === 1 ? '' : 's'}` : '';
     const detectedProfile = state.data?.domains?.find(item => item.domain === domain)?.mail_profile;
     const mailNote = detectedProfile ? mailProfileText(detectedProfile) : `Hosting type: ${hostingLabels[smtpProfile.hosting_type] || 'Automatic'} (${smtpProfile.hosting_type === 'auto' ? 'Auto-detected' : 'Selected'}) · Provider: ${providerLabels[smtpProfile.provider] || 'Automatic'} (${smtpProfile.provider === 'auto' ? 'Auto-detected' : 'Selected'})`;
-    return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${esc(mailNote)} · ${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} TLS certificate${endpoints.length === 1 ? '' : 's'}${esc(bimiNote)}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
+    return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${esc(mailNote)} · ${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} TLS certificate${endpoints.length === 1 ? '' : 's'}${esc(exceptionNote)}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
   }).join('') : '<div class="empty-list"><p>No domains are configured.</p><button type="button" data-add-domain>Add a domain</button></div>';
 }
 
@@ -528,6 +529,7 @@ function openDomainEditor(index = null) {
   const domain = index === null ? '' : state.settings.monitored_domains[index];
   const configured = clone(state.settings.bimi_exceptions?.[domain] || {});
   const exceptions = { self_asserted: configured.self_asserted || (configured.mode ? configured : null), no_logo: configured.no_logo || null };
+  const controlExceptions = clone(state.settings.control_exceptions?.[domain] || {});
   const smtpProfile = clone(state.settings.smtp_profiles?.[domain] || { hosting_type: 'auto', provider: 'auto', expected_hostname: '', relay_context: 'auto' });
   state.editor = {
     index,
@@ -537,6 +539,8 @@ function openDomainEditor(index = null) {
     smtpProfile,
     bimiExceptionsOriginal: exceptions,
     bimiExceptionDirty: { self_asserted: false, no_logo: false },
+    controlExceptionsOriginal: { mta_sts: controlExceptions.mta_sts || null, tls_certificates: controlExceptions.tls_certificates || null },
+    controlExceptionDirty: { mta_sts: false, tls_certificates: false },
     editingSelector: null,
     editingEndpoint: null
   };
@@ -553,9 +557,12 @@ function openDomainEditor(index = null) {
   $('#endpoint-add').textContent = '＋';
   setBimiExceptionFields('self_asserted', '#bimi-ignore-mode', '#bimi-ignore-months');
   setBimiExceptionFields('no_logo', '#bimi-no-logo-ignore-mode', '#bimi-no-logo-ignore-months');
+  setControlExceptionFields('mta_sts', '#mta-sts-ignore-mode', '#mta-sts-ignore-months');
+  setControlExceptionFields('tls_certificates', '#tls-certificates-ignore-mode', '#tls-certificates-ignore-months');
   $('#domain-message').textContent = '';
   renderEditorLists();
   updateBimiIgnoreVisibility();
+  updateControlIgnoreVisibility();
   updateMailHostingFields();
   $('#domain-dialog').showModal();
 }
@@ -592,6 +599,35 @@ function bimiExceptionFromFields(kind, modeSelector, monthsSelector) {
   if (!Number.isInteger(months) || months < 1 || months > 120) throw new Error('Enter each BIMI exception period as a number between 1 and 120 months.');
   const original = state.editor.bimiExceptionsOriginal[kind];
   if (!state.editor.bimiExceptionDirty[kind] && original?.mode === 'until') return clone(original);
+  const expires = new Date(); expires.setUTCMonth(expires.getUTCMonth() + months); return { mode: 'until', expires_at: expires.toISOString() };
+}
+
+function setControlExceptionFields(kind, modeSelector, monthsSelector) {
+  const exception = state.editor.controlExceptionsOriginal[kind];
+  const expiration = exception?.mode === 'until' ? new Date(exception.expires_at) : null;
+  const active = exception?.mode === 'permanent' || (expiration instanceof Date && Number.isFinite(expiration.valueOf()) && expiration > new Date());
+  $(modeSelector).value = active && exception.mode === 'permanent' ? 'permanent' : active && exception.mode === 'until' ? 'temporary' : 'none';
+  $(monthsSelector).value = active && exception?.mode === 'until' ? Math.max(1, Math.ceil((expiration - Date.now()) / 2629800000)) : 6;
+}
+
+function updateControlIgnoreVisibility() {
+  for (const item of [{ kind: 'mta_sts', mode: '#mta-sts-ignore-mode', field: '#mta-sts-ignore-months-field', note: '#mta-sts-ignore-expiration' }, { kind: 'tls_certificates', mode: '#tls-certificates-ignore-mode', field: '#tls-certificates-ignore-months-field', note: '#tls-certificates-ignore-expiration' }]) {
+    const temporary = $(item.mode).value === 'temporary'; $(item.field).hidden = !temporary;
+    const original = state.editor?.controlExceptionsOriginal?.[item.kind]; const note = $(item.note);
+    if (!temporary) note.textContent = '';
+    else if (!state.editor?.controlExceptionDirty?.[item.kind] && original?.mode === 'until') { const expires = new Date(original.expires_at); note.textContent = expires > new Date() ? `Current exception expires ${expires.toLocaleDateString()}.` : `The previous exception expired ${expires.toLocaleDateString()}. Saving renews it.`; }
+    else note.textContent = 'The exception period begins when Settings are saved.';
+  }
+}
+
+function controlExceptionFromFields(kind, modeSelector, monthsSelector) {
+  const mode = $(modeSelector).value;
+  if (mode === 'none') return null;
+  if (mode === 'permanent') return { mode: 'permanent' };
+  const months = Number($(monthsSelector).value);
+  if (!Number.isInteger(months) || months < 1 || months > 120) throw new Error('Enter each mail-security exception period as a number between 1 and 120 months.');
+  const original = state.editor.controlExceptionsOriginal[kind];
+  if (!state.editor.controlExceptionDirty[kind] && original?.mode === 'until') return clone(original);
   const expires = new Date(); expires.setUTCMonth(expires.getUTCMonth() + months); return { mode: 'until', expires_at: expires.toISOString() };
 }
 
@@ -638,8 +674,13 @@ function saveDomain(event) {
   if (duplicate >= 0) return showDomainError('That domain is already monitored.');
   const expectedHostname = $('#smtp-expected-host').value.trim().toLowerCase().replace(/\.$/, '');
   if (expectedHostname && !/^(?=.{1,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(expectedHostname)) return showDomainError('Enter a valid expected SMTP hostname or leave it blank.');
-  let selfAssertedException; let noLogoException;
-  try { selfAssertedException = bimiExceptionFromFields('self_asserted', '#bimi-ignore-mode', '#bimi-ignore-months'); noLogoException = bimiExceptionFromFields('no_logo', '#bimi-no-logo-ignore-mode', '#bimi-no-logo-ignore-months'); }
+  let selfAssertedException; let noLogoException; let mtaStsException; let tlsCertificatesException;
+  try {
+    selfAssertedException = bimiExceptionFromFields('self_asserted', '#bimi-ignore-mode', '#bimi-ignore-months');
+    noLogoException = bimiExceptionFromFields('no_logo', '#bimi-no-logo-ignore-mode', '#bimi-no-logo-ignore-months');
+    mtaStsException = controlExceptionFromFields('mta_sts', '#mta-sts-ignore-mode', '#mta-sts-ignore-months');
+    tlsCertificatesException = controlExceptionFromFields('tls_certificates', '#tls-certificates-ignore-mode', '#tls-certificates-ignore-months');
+  }
   catch (error) { return showDomainError(error.message); }
   const oldDomain = state.editor.originalDomain;
   if (state.editor.index === null) state.settings.monitored_domains.push(domain);
@@ -649,6 +690,7 @@ function saveDomain(event) {
     delete state.settings.tls_endpoints[oldDomain];
     if (state.settings.smtp_profiles) delete state.settings.smtp_profiles[oldDomain];
     if (state.settings.bimi_exceptions) delete state.settings.bimi_exceptions[oldDomain];
+    if (state.settings.control_exceptions) delete state.settings.control_exceptions[oldDomain];
   }
   state.settings.dkim_selectors[domain] = clone(state.editor.selectors);
   state.settings.tls_endpoints[domain] = clone(state.editor.endpoints);
@@ -657,6 +699,9 @@ function saveDomain(event) {
   state.settings.bimi_exceptions ||= {};
   if (selfAssertedException || noLogoException) state.settings.bimi_exceptions[domain] = { ...(selfAssertedException ? { self_asserted: selfAssertedException } : {}), ...(noLogoException ? { no_logo: noLogoException } : {}) };
   else delete state.settings.bimi_exceptions[domain];
+  state.settings.control_exceptions ||= {};
+  if (mtaStsException || tlsCertificatesException) state.settings.control_exceptions[domain] = { ...(mtaStsException ? { mta_sts: mtaStsException } : {}), ...(tlsCertificatesException ? { tls_certificates: tlsCertificatesException } : {}) };
+  else delete state.settings.control_exceptions[domain];
   $('#domain-dialog').close();
   renderSettingsDomains();
   $('#settings-message').textContent = 'Domain changes are ready. Save settings to apply them.';
@@ -840,6 +885,10 @@ $('#bimi-ignore-mode').onchange = () => { state.editor.bimiExceptionDirty.self_a
 $('#bimi-ignore-months').oninput = () => { state.editor.bimiExceptionDirty.self_asserted = true; updateBimiIgnoreVisibility(); };
 $('#bimi-no-logo-ignore-mode').onchange = () => { state.editor.bimiExceptionDirty.no_logo = true; updateBimiIgnoreVisibility(); };
 $('#bimi-no-logo-ignore-months').oninput = () => { state.editor.bimiExceptionDirty.no_logo = true; updateBimiIgnoreVisibility(); };
+$('#mta-sts-ignore-mode').onchange = () => { state.editor.controlExceptionDirty.mta_sts = true; updateControlIgnoreVisibility(); };
+$('#mta-sts-ignore-months').oninput = () => { state.editor.controlExceptionDirty.mta_sts = true; updateControlIgnoreVisibility(); };
+$('#tls-certificates-ignore-mode').onchange = () => { state.editor.controlExceptionDirty.tls_certificates = true; updateControlIgnoreVisibility(); };
+$('#tls-certificates-ignore-months').oninput = () => { state.editor.controlExceptionDirty.tls_certificates = true; updateControlIgnoreVisibility(); };
 $('#smtp-hosting-type').onchange = updateMailHostingFields;
 $('#log-service').onchange = renderSystemLogs;
 $('#service-log-service').onchange = loadServiceLogs;
@@ -910,6 +959,7 @@ document.onclick = event => {
     delete state.settings.tls_endpoints[removed];
     if (state.settings.smtp_profiles) delete state.settings.smtp_profiles[removed];
     if (state.settings.bimi_exceptions) delete state.settings.bimi_exceptions[removed];
+    if (state.settings.control_exceptions) delete state.settings.control_exceptions[removed];
     renderSettingsDomains();
     $('#settings-message').textContent = `${removed} was removed. Save settings to apply this change.`;
     $('#settings-message').className = 'pending';

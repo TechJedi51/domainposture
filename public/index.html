@@ -21,7 +21,7 @@
   <header>
     <a class="brand" href="/" data-route="/">
       <img src="/mailposture.svg" alt="">
-      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v2.1.0</small></span>
+      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v2.2.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
       <a class="toolbar-button" href="/" data-route="/"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span>Dashboard</span></a>
@@ -261,6 +261,14 @@
         <div><h3>TLS certificates</h3><p>Add every direct-TLS host and port whose certificate should be monitored.</p></div>
         <div id="endpoint-list" class="editable-list compact-list"></div>
         <div class="inline-editor endpoint-editor"><input id="endpoint-host" type="text" placeholder="mail.example.com" aria-label="TLS host"><input id="endpoint-port" type="number" min="1" max="65535" value="443" aria-label="TLS port"><button id="endpoint-add" class="symbol-button" type="button" aria-label="Add TLS endpoint" title="Add endpoint">＋</button></div>
+      </section>
+      <section class="editor-section">
+        <div><h3>Mail security review exceptions</h3><p>Ignore intentionally absent MTA-STS or TLS certificate monitoring. A partially configured or invalid MTA-STS policy and a failing, untrusted, or expiring configured certificate still need attention.</p></div>
+        <div class="field"><label for="mta-sts-ignore-mode">No MTA-STS configuration</label><select id="mta-sts-ignore-mode"><option value="none">Continue showing Needs action</option><option value="temporary">Ignore for a set period</option><option value="permanent">Ignore permanently</option></select></div>
+        <div id="mta-sts-ignore-months-field" class="field" hidden><label for="mta-sts-ignore-months">Number of months</label><input id="mta-sts-ignore-months" type="number" min="1" max="120" value="6"><p id="mta-sts-ignore-expiration"></p></div>
+        <div class="field"><label for="tls-certificates-ignore-mode">No TLS certificate endpoints</label><select id="tls-certificates-ignore-mode"><option value="none">Continue showing Review</option><option value="temporary">Ignore for a set period</option><option value="permanent">Ignore permanently</option></select></div>
+        <div id="tls-certificates-ignore-months-field" class="field" hidden><label for="tls-certificates-ignore-months">Number of months</label><input id="tls-certificates-ignore-months" type="number" min="1" max="120" value="6"><p id="tls-certificates-ignore-expiration"></p></div>
+        <p class="settings-note">Ignored controls remain visible and labeled Ignored. They are removed from the attention queue and do not lower the posture score.</p>
       </section>
       <section class="editor-section">
         <div><h3>BIMI review exceptions</h3><p>Ignore an intentionally self-asserted logo or intentionally absent logo. Invalid records, unsafe logos, and unmet DMARC requirements still need attention.</p></div>
