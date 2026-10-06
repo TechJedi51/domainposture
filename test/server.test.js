@@ -31,6 +31,14 @@ async function run(){
   const savedDiscord=app.discordWebhookConfiguration({discord_webhook:discordUrl});
   assert.strictEqual(savedDiscord.source,'settings');
   assert.strictEqual(savedDiscord.url.toString(),discordUrl);
+  let testedDiscordMessage='';
+  let testedDiscordWebhook=null;
+  const discordTest=await app.testDiscordNotification(async(message,webhook)=>{testedDiscordMessage=message;testedDiscordWebhook=webhook;return true;},savedDiscord.url);
+  assert.strictEqual(discordTest.ok,true);
+  assert.match(testedDiscordMessage,/Test Notification/);
+  assert.strictEqual(testedDiscordWebhook.toString(),discordUrl);
+  await assert.rejects(()=>app.testDiscordNotification(async()=>true,null),/Configure and save/);
+  await assert.rejects(()=>app.testDiscordNotification(async()=>false,savedDiscord.url),/did not accept/);
   delete process.env.DOMAINPOSTURE_DISCORD_WEBHOOK;
   const secretsKey=Buffer.alloc(32,7);
   const encryptedSecrets=app.encryptSecrets({discord_webhook:discordUrl,imap_password:'private'},secretsKey);
@@ -54,8 +62,17 @@ async function run(){
     const migratedSecrets=JSON.parse(fs.readFileSync(managedSecretsPath,'utf8'));
     assert.strictEqual(app.encryptedSecretsDocument(migratedSecrets),true);
     assert.deepStrictEqual(app.decryptSecrets(migratedSecrets,generatedKey),{imap_password:'legacy-private'});
+    const pendingKey=Buffer.alloc(32,9);
+    const keyring=app.decodeManagedSecretsKeyFile(JSON.stringify({schema_version:1,current:pendingKey.toString('base64'),previous:[generated.key]}));
+    assert.deepStrictEqual(app.decryptSecretsWithKeys(migratedSecrets,keyring.keys),{imap_password:'legacy-private'});
     await assert.rejects(()=>app.createManagedSecretsKey({keyPath:managedKeyPath,secretsPath:managedSecretsPath,current:{key:generatedKey,source:'managed'}}),/already configured/);
     await assert.rejects(()=>app.createManagedSecretsKey({keyPath:path.join(keyTestDirectory,'replacement-key'),secretsPath:managedSecretsPath,current:{key:null,source:null}}),/Restore the original key/);
+    const rotated=await app.rotateManagedSecretsKey({keyPath:managedKeyPath,secretsPath:managedSecretsPath,current:{key:generatedKey,keys:[generatedKey],source:'managed'}});
+    const rotatedKey=app.decodeSecretsKey(rotated.key);
+    assert.notDeepStrictEqual(rotatedKey,generatedKey);
+    assert.strictEqual(fs.readFileSync(managedKeyPath,'utf8').trim(),rotated.key);
+    assert.deepStrictEqual(app.decryptSecrets(JSON.parse(fs.readFileSync(managedSecretsPath,'utf8')),rotatedKey),{imap_password:'legacy-private'});
+    await assert.rejects(()=>app.rotateManagedSecretsKey({keyPath:managedKeyPath,secretsPath:managedSecretsPath,current:{key:rotatedKey,source:'external'}}),/Only an encryption key managed/);
   } finally {
     fs.rmSync(keyTestDirectory,{recursive:true,force:true});
   }
@@ -345,7 +362,7 @@ async function run(){
   assert.strictEqual(shards.affected_report_shards,0);
   assert.strictEqual(shards.groups.find(group=>group.category==='OpenSearch security audit logs').unassigned_shards,1);
   process.env.DEMO_MODE='true';const status=await app.refresh();assert.strictEqual(status.domains.length,1);assert.ok(status.summary.critical>0);assert.strictEqual(status.version,require('../package.json').version);assert.strictEqual(status.domains[0].mail_profile.provider,'self_hosted');
-  assert.strictEqual(require('../package.json').version,'3.1.1');
+  assert.strictEqual(require('../package.json').version,'3.2.0');
   const page=fs.readFileSync('public/index.html','utf8'),client=fs.readFileSync('public/app.js','utf8'),styles=fs.readFileSync('public/settings.css','utf8'),icon=fs.readFileSync('public/domainposture.svg','utf8'),standalone=fs.readFileSync('compose.standalone.yml','utf8'),dockerfile=fs.readFileSync('Dockerfile','utf8'),smtpSource=fs.readFileSync('smtp.js','utf8');
   assert.match(page,/DomainPosture/);
   assert.match(page,/id="dashboard-view"/);
@@ -355,7 +372,7 @@ async function run(){
   assert.match(page,/id="log-service"/);
   assert.match(page,/id="service-log"/);
   assert.match(page,/id="service-log-service"/);
-  assert.match(page,/v3\.1\.1/);
+  assert.match(page,/v3\.2\.0/);
   assert.match(page,/Domain Health Dashboard/);
   assert.doesNotMatch(page,/DMARC authentication and SMTP TLS delivery results for the selected history window/);
   assert.match(page,/id="domain-menu-button"/);
@@ -386,7 +403,10 @@ async function run(){
   for(const [before,after] of [['Domain certificates','Additional TLS endpoints'],['Additional TLS endpoints','Mail hosting and SMTP probes'],['Mail hosting and SMTP probes','DKIM selectors'],['DKIM selectors','Mail security review exceptions'],['Mail security review exceptions','BIMI review exceptions']]) assert.ok(domainEditor.indexOf(before)<domainEditor.indexOf(after),`${before} must appear before ${after}`);
   assert.match(page,/id="certificate-check-minutes"/);
   assert.match(page,/id="discord-webhook"/);
-  assert.match(page,/id="discord-webhook-clear"/);
+  assert.doesNotMatch(page,/id="discord-webhook-clear"/);
+  assert.match(page,/id="change-discord-webhook"/);
+  assert.match(page,/id="test-discord-webhook"/);
+  assert.match(page,/id="rotate-secrets-key"/);
   assert.match(page,/id="discord-enabled"/);
   assert.match(page,/id="ssl-warning-threshold"/);
   assert.match(page,/IP and domain reputation/);
@@ -408,6 +428,8 @@ async function run(){
   assert.match(page,/id="snapshots-enabled"/);
   assert.match(page,/role="tablist"/);
   assert.match(page,/data-settings-tab="parsedmarc"/);
+  assert.match(page,/data-settings-tab="general"/);
+  for(const [before,after] of [['data-settings-tab="domains"','data-settings-tab="appearance"'],['data-settings-tab="appearance"','data-settings-tab="opensearch"'],['data-settings-tab="opensearch"','data-settings-tab="parsedmarc"'],['data-settings-tab="parsedmarc"','data-settings-tab="general"']]) assert.ok(page.indexOf(before)<page.indexOf(after),`${before} must appear before ${after}`);
   assert.match(page,/domains-icon/);
   assert.match(page,/appearance-icon/);
   assert.match(page,/opensearch-icon/);
@@ -443,6 +465,8 @@ async function run(){
   assert.match(client,/ignored: 'Ignored'/);
   assert.match(client,/smtpDiagnosticsCard/);
   assert.match(client,/report-smtp-diagnostics/);
+  assert.match(client,/detailCards\(domain\.reports, domain\.check_sections\)/);
+  assert.match(client,/Checks switched off/);
   assert.match(client,/certificate-days/);
   assert.match(client,/certificateControlCard/);
   assert.match(client,/data-check-now/);
@@ -479,7 +503,7 @@ async function run(){
   assert.match(dockerfile,/dns-security\.js/);
   assert.match(dockerfile,/ssl-monitor\.js/);
   assert.match(dockerfile,/ghcr\.io\/idesyatov\/ssl-watch:v\$\{SSL_WATCH_VERSION\}/);
-  assert.match(dockerfile,/org\.opencontainers\.image\.version="3\.1\.1"/);
+  assert.match(dockerfile,/org\.opencontainers\.image\.version="3\.2\.0"/);
   assert.match(smtpSource,/RCPT TO:<probe@example\.net>/);
   assert.doesNotMatch(smtpSource,/command\(['"]DATA/);
   assert.match(smtpSource,/policyBlock/);
@@ -508,8 +532,12 @@ async function run(){
   assert.match(page,/id="create-secrets-key"/);
   assert.match(page,/This key will not be shown again/);
   assert.match(client,/\/api\/secrets-key/);
+  assert.match(client,/\/api\/secrets-key\/rotate/);
+  assert.match(client,/\/api\/notifications\/discord\/test/);
   assert.match(client,/navigator\.clipboard\.writeText/);
   assert.match(styles,/--review:#ffd60a/i);
+  assert.match(styles,/\.number-with-unit/);
+  assert.match(styles,/\.general-icon/);
   assert.match(icon,/<svg/);
   assert.match(icon,/check mark/i);
   assert.match(icon,/#0C71C3/);

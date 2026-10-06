@@ -458,16 +458,29 @@ function decodeSecretsKey(value) {
   return key;
 }
 
+function decodeManagedSecretsKeyFile(value) {
+  const raw = String(value || '').trim();
+  if (!raw.startsWith('{')) {
+    const key = decodeSecretsKey(raw);
+    return { key, keys: [key] };
+  }
+  let document;
+  try { document = JSON.parse(raw); } catch (_) { throw new Error('The managed secrets key file is not valid JSON.'); }
+  if (document?.schema_version !== 1 || typeof document.current !== 'string') throw new Error('The managed secrets key file has an unsupported format.');
+  const keys = [document.current, ...(Array.isArray(document.previous) ? document.previous : [])].map(decodeSecretsKey);
+  return { key: keys[0], keys };
+}
+
 function secretsKeyConfiguration() {
-  if (process.env.DOMAINPOSTURE_SECRETS_KEY) return { key: decodeSecretsKey(process.env.DOMAINPOSTURE_SECRETS_KEY), source: 'environment' };
-  try { return { key: decodeSecretsKey(fs.readFileSync(SECRETS_KEY_FILE, 'utf8')), source: 'external' }; }
+  if (process.env.DOMAINPOSTURE_SECRETS_KEY) { const key = decodeSecretsKey(process.env.DOMAINPOSTURE_SECRETS_KEY); return { key, keys: [key], source: 'environment' }; }
+  try { const key = decodeSecretsKey(fs.readFileSync(SECRETS_KEY_FILE, 'utf8')); return { key, keys: [key], source: 'external' }; }
   catch (error) {
     if (error.code !== 'ENOENT') throw new Error(`The DomainPosture external secrets key could not be read: ${error.message}`);
     if (process.env.DOMAINPOSTURE_SECRETS_KEY_FILE) throw new Error(`The configured DomainPosture secrets key file does not exist: ${SECRETS_KEY_FILE}`);
   }
-  try { return { key: decodeSecretsKey(fs.readFileSync(MANAGED_SECRETS_KEY_FILE, 'utf8')), source: 'managed' }; }
+  try { return { ...decodeManagedSecretsKeyFile(fs.readFileSync(MANAGED_SECRETS_KEY_FILE, 'utf8')), source: 'managed' }; }
   catch (error) {
-    if (error.code === 'ENOENT') return { key: null, source: null };
+    if (error.code === 'ENOENT') return { key: null, keys: [], source: null };
     throw new Error(`The DomainPosture managed secrets key could not be read: ${error.message}`);
   }
 }
@@ -499,10 +512,17 @@ function decryptSecrets(document, key = secretsEncryptionKey()) {
   }
 }
 
+function decryptSecretsWithKeys(document, keys = secretsKeyConfiguration().keys) {
+  for (const key of keys || []) {
+    try { return decryptSecrets(document, key); } catch (_) { /* Try the previous managed key during an interrupted rotation. */ }
+  }
+  throw new Error('The encrypted DomainPosture secrets file could not be opened. Verify that the configured encryption key is the original key.');
+}
+
 function readSecrets() {
   try {
     const saved = JSON.parse(fs.readFileSync(SECRETS_PATH, 'utf8'));
-    return encryptedSecretsDocument(saved) ? decryptSecrets(saved) : saved;
+    return encryptedSecretsDocument(saved) ? decryptSecretsWithKeys(saved) : saved;
   } catch (error) {
     if (error.code === 'ENOENT') return {};
     throw error;
@@ -525,7 +545,7 @@ function secretsStorageStatus() {
   }
   if (!encryptedSecretsDocument(saved)) return result('secrets_storage', 'Secret storage', 'warning', 'Legacy plaintext secrets', 'The existing secrets file is readable but is not encrypted.', 'Open Settings and create the encryption key to migrate the file in place.');
   try {
-    decryptSecrets(saved);
+    decryptSecretsWithKeys(saved);
     return result('secrets_storage', 'Secret storage', 'healthy', 'Secrets encrypted', 'Application-managed secrets use authenticated AES-256-GCM encryption at rest.', 'Back up the encryption key separately from the application data.');
   } catch (error) {
     return result('secrets_storage', 'Secret storage', 'critical', 'Encrypted secrets unavailable', error.message, 'Restore the original encryption key. Do not replace it while encrypted secrets still exist.');
@@ -585,7 +605,7 @@ function publicSettings(settings = getSettings()) {
     ...settings,
     mailbox: { ...settings.mailbox, password: '', password_set: Boolean(secrets.imap_password) },
     notifications: { ...settings.notifications, discord_webhook_configured: Boolean(discord.url), discord_webhook_source: discord.source },
-    secrets_key: { configured: Boolean(keyConfiguration.key), source: keyConfiguration.source, can_generate: !keyConfiguration.key }
+    secrets_key: { configured: Boolean(keyConfiguration.key), source: keyConfiguration.source, can_generate: !keyConfiguration.key, can_rotate: keyConfiguration.source === 'managed' }
   };
 }
 
@@ -616,6 +636,29 @@ async function createManagedSecretsKey(options = {}) {
   if (saved) await atomicWrite(secretsPath, `${JSON.stringify(encryptSecrets(saved, key), null, 2)}\n`, 0o600);
   addDiagnosticEvent('domainposture', 'info', 'Secrets encryption key created', saved ? 'Legacy application secrets were encrypted.' : 'The managed recovery key was created in persistent storage.');
   return { key: encoded, source: 'managed', migrated_legacy_secrets: Boolean(saved) };
+}
+
+async function rotateManagedSecretsKey(options = {}) {
+  const keyPath = options.keyPath || MANAGED_SECRETS_KEY_FILE;
+  const secretsPath = options.secretsPath || SECRETS_PATH;
+  const current = options.current === undefined ? secretsKeyConfiguration() : options.current;
+  if (!current?.key || current.source !== 'managed') throw new Error('Only an encryption key managed by DomainPosture can be rotated here. Rotate external or environment keys in the deployment system.');
+
+  let saved = null;
+  try { saved = JSON.parse(await fs.promises.readFile(secretsPath, 'utf8')); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const currentKeys = current.keys?.length ? current.keys : [current.key];
+  const secrets = encryptedSecretsDocument(saved) ? decryptSecretsWithKeys(saved, currentKeys) : (saved || {});
+  const encoded = crypto.randomBytes(32).toString('base64');
+  const key = decodeSecretsKey(encoded);
+  const recoveryDocument = { schema_version: 1, current: encoded, previous: [current.key.toString('base64')] };
+
+  // The temporary keyring keeps both keys usable if the process stops between the two atomic writes.
+  await atomicWrite(keyPath, `${JSON.stringify(recoveryDocument, null, 2)}\n`, 0o600);
+  await atomicWrite(secretsPath, `${JSON.stringify(encryptSecrets(secrets, key), null, 2)}\n`, 0o600);
+  await atomicWrite(keyPath, `${encoded}\n`, 0o600);
+  addDiagnosticEvent('domainposture', 'info', 'Secrets encryption key rotated', 'Application-managed secrets were re-encrypted without changing their values.');
+  return { key: encoded, source: 'managed', rotated: true };
 }
 
 function parsedmarcIni(settings, secrets = {}) {
@@ -1371,6 +1414,22 @@ function sendDiscordMessage(content, webhook = discordWebhookUrl()) {
   });
 }
 
+async function testDiscordNotification(send = sendDiscordMessage, webhook = discordWebhookUrl()) {
+  if (!webhook) {
+    const error = new Error('Configure and save a Discord webhook before sending a test notification.');
+    error.statusCode = 400;
+    throw error;
+  }
+  const delivered = await send(`**DomainPosture: Test Notification**\nDiscord notifications are configured correctly.\nVersion ${APP_VERSION}`, webhook);
+  if (!delivered) {
+    const error = new Error('Discord did not accept the test notification. Verify the saved webhook and network connection.');
+    error.statusCode = 502;
+    throw error;
+  }
+  addDiagnosticEvent('domainposture', 'info', 'Discord test notification sent', 'Discord accepted a user-requested test notification.');
+  return { ok: true, message: 'Test notification sent.' };
+}
+
 function milestoneSeverity(value, milestones) {
   if (value === null || value === undefined) return 0;
   if (typeof value === 'string') return 100;
@@ -1543,9 +1602,11 @@ const server = http.createServer(async (req,res) => {
   }
   if (pathname === '/api/settings' && req.method === 'GET') { try { return json(res, 200, publicSettings()); } catch (error) { return json(res, 500, { error: error.message }); } }
   if (pathname === '/api/secrets-key' && req.method === 'POST') { try { if (!sameOriginRequest(req)) return json(res, 403, { error: 'Cross-origin requests are not allowed.' }); return json(res, 201, await createManagedSecretsKey()); } catch (error) { return json(res, 409, { error: error.message }); } }
+  if (pathname === '/api/secrets-key/rotate' && req.method === 'POST') { try { if (!sameOriginRequest(req)) return json(res, 403, { error: 'Cross-origin requests are not allowed.' }); return json(res, 200, await rotateManagedSecretsKey()); } catch (error) { return json(res, 409, { error: error.message }); } }
+  if (pathname === '/api/notifications/discord/test' && req.method === 'POST') { try { if (!sameOriginRequest(req)) return json(res, 403, { error: 'Cross-origin requests are not allowed.' }); return json(res, 200, await testDiscordNotification()); } catch (error) { return json(res, error.statusCode || 502, { error: error.message }); } }
   if (pathname === '/api/settings' && req.method === 'PUT') { try { if (!sameOriginRequest(req)) return json(res, 403, { error: 'Cross-origin requests are not allowed.' }); const settings = await saveSettings(await requestJson(req)); if (activeRefresh) await activeRefresh; await refresh(); return json(res, 200, settings); } catch (error) { return json(res, 400, { error: error.message }); } }
   staticFile(req,res);
 });
 function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`DomainPosture listening on :${PORT}`); addDiagnosticEvent('domainposture', 'info', 'DomainPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeControlExceptions, normalizeSmtpProfiles, normalizeCertificateChecks, normalizeCheckSections, normalizeNotifications, validDiscordWebhookUrl, discordWebhookConfiguration, decodeSecretsKey, secretsKeyConfiguration, createManagedSecretsKey, encryptSecrets, decryptSecrets, encryptedSecretsDocument, secretsStorageStatus, activeBimiException, applyMissingControlException, isMissingMtaSts, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, domainScore, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, certificate, domainCertificateComponent, processNotifications, sameOriginRequest, refresh, getOperationalState, getSnapshot:()=>snapshot };
+module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeControlExceptions, normalizeSmtpProfiles, normalizeCertificateChecks, normalizeCheckSections, normalizeNotifications, validDiscordWebhookUrl, discordWebhookConfiguration, decodeSecretsKey, decodeManagedSecretsKeyFile, secretsKeyConfiguration, createManagedSecretsKey, rotateManagedSecretsKey, encryptSecrets, decryptSecrets, decryptSecretsWithKeys, encryptedSecretsDocument, secretsStorageStatus, testDiscordNotification, activeBimiException, applyMissingControlException, isMissingMtaSts, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, domainScore, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, certificate, domainCertificateComponent, processNotifications, sameOriginRequest, refresh, getOperationalState, getSnapshot:()=>snapshot };

@@ -2,7 +2,7 @@
 
 const $ = selector => document.querySelector(selector);
 const storedDomainSort = localStorage.getItem('domainposture-domain-sort') || localStorage.getItem('mailposture-domain-sort');
-const state = { data: null, system: null, logs: [], serviceLogs: null, selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/', domainSort: storedDomainSort === 'alphabetical' ? 'alphabetical' : 'priority' };
+const state = { data: null, system: null, logs: [], serviceLogs: null, selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/', domainSort: storedDomainSort === 'alphabetical' ? 'alphabetical' : 'priority', editingDiscordWebhook: false };
 const names = { critical: 'Needs action', warning: 'Review', healthy: 'Healthy', info: 'Info', ignored: 'Ignored' };
 const themeQuery = matchMedia('(prefers-color-scheme: dark)');
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]);
@@ -154,8 +154,15 @@ function smtpDiagnosticsCard(report, id = '') {
   return `<article${reportId(id)} class="report-card wide"><div class="report-card-header"><div><h3>MX endpoint results</h3><p>Connection, SMTP identity, STARTTLS, and relay protection for each published MX host.</p></div></div>${mailProfileMarkup(profile)}<p class="report-explanation">PTR and banner names on managed infrastructure may differ from the customer-facing MX name. Slow timing from this single monitoring location is advisory. The relay probe never sends DATA or message content; acceptance is conclusive only from a configured external, untrusted location.</p><div class="smtp-endpoints">${endpointCards}</div></article>`;
 }
 
-function detailCards(reports) {
-  return `${aggregateCard(reports?.aggregate, true, 'report-dmarc')}${smtpTlsCard(reports?.smtp_tls, 'report-smtp-tls', true)}<article id="report-dmarc-sources" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>Top failing DMARC sources</h3><p>Source addresses producing the most failed messages, with reverse-DNS names when available</p></div></div>${sourceList(reports?.aggregate?.top_failing_sources)}</article>${reportingOrganizationsCard(reports?.smtp_tls, 'report-smtp-tls-organizations')}${failureCard(reports?.failure, 'report-dmarc-failure')}<article id="report-smtp-tls-failures" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>SMTP TLS failure types</h3><p>Transport problems reported by sending services</p></div></div>${rankedList(reports?.smtp_tls?.failure_types, 'type', 'count', 'No SMTP TLS failure types were reported.')}</article>${dmarcReportersCard(reports?.aggregate, 'report-dmarc-reporters')}<div class="report-subheading wide"><small>Live service check</small><h3>SMTP server diagnostics</h3></div>${smtpDiagnosticsCard(reports?.smtp_diagnostics, 'report-smtp-diagnostics')}`;
+function detailCards(reports, configuredSections = {}) {
+  const sections = { domain_certificates: true, additional_tls: true, smtp: true, dkim: true, mail_security: true, bimi: true, ...configuredSections };
+  const mailReports = sections.mail_security ? `${aggregateCard(reports?.aggregate, true, 'report-dmarc')}${smtpTlsCard(reports?.smtp_tls, 'report-smtp-tls', true)}<article id="report-dmarc-sources" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>Top failing DMARC sources</h3><p>Source addresses producing the most failed messages, with reverse-DNS names when available</p></div></div>${sourceList(reports?.aggregate?.top_failing_sources)}</article>${reportingOrganizationsCard(reports?.smtp_tls, 'report-smtp-tls-organizations')}${failureCard(reports?.failure, 'report-dmarc-failure')}<article id="report-smtp-tls-failures" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>SMTP TLS failure types</h3><p>Transport problems reported by sending services</p></div></div>${rankedList(reports?.smtp_tls?.failure_types, 'type', 'count', 'No SMTP TLS failure types were reported.')}</article>${dmarcReportersCard(reports?.aggregate, 'report-dmarc-reporters')}` : '';
+  const smtpReports = sections.smtp ? `<div class="report-subheading wide"><small>Live service check</small><h3>SMTP server diagnostics</h3></div>${smtpDiagnosticsCard(reports?.smtp_diagnostics, 'report-smtp-diagnostics')}` : '';
+  const labels = { domain_certificates: 'Domain certificates', additional_tls: 'Additional TLS endpoints', smtp: 'Mail hosting and SMTP probes', dkim: 'DKIM selectors', mail_security: 'Mail security review exceptions', bimi: 'BIMI review exceptions' };
+  const disabled = Object.entries(labels).filter(([key]) => !sections[key]).map(([, label]) => `<li>${esc(label)}</li>`).join('');
+  const empty = mailReports || smtpReports ? '' : '<div class="empty-state wide"><h3>No Report Center checks are enabled</h3><p>Enable mail security or SMTP probes in this domain’s settings to show report information here.</p></div>';
+  const disabledSection = disabled ? `<section class="disabled-checks wide"><small>Domain configuration</small><h3>Checks switched off</h3><p>These checks are excluded from this domain’s score and Report Center.</p><ul>${disabled}</ul></section>` : '';
+  return `${mailReports}${smtpReports}${empty}${disabledSection}`;
 }
 
 function organizationReports(domains) {
@@ -276,7 +283,7 @@ function renderDomain() {
     const bimiLogo = check.id === 'bimi' && check.evidence?.logo_available ? `<img class="bimi-logo" src="/api/bimi-logo?domain=${encodeURIComponent(domain.domain)}" alt="BIMI logo for ${esc(domain.domain)}">` : '';
     return `<button class="card ${esc(check.status)}${days === null ? '' : ' tls-card'}${bimiLogo ? ' bimi-card' : ''}" data-check="${esc(check.id)}">${days === null ? '' : `<span class="certificate-days" aria-hidden="true">${number(days)}</span>`}<div class="card-content"><div class="card-top"><span><span class="label">${esc(check.label)}</span>${endpoint ? `<span class="card-context">${esc(endpoint)}</span>` : ''}</span><span class="state ${check.status}">${names[check.status]}</span></div>${bimiLogo}<h3>${esc(check.summary)}</h3><p>${esc(check.detail)}</p></div></button>`;
   }).join('');
-  $('#domain-reports').innerHTML = detailCards(domain.reports);
+  $('#domain-reports').innerHTML = detailCards(domain.reports, domain.check_sections);
 }
 
 function renderStatus() {
@@ -448,16 +455,35 @@ function renderSettingsDomains() {
 
 function renderSecretsKeySettings(settings = state.settings) {
   const key = settings?.secrets_key || {};
-  const button = $('#create-secrets-key');
-  $('#secrets-key-status').className = 'settings-note';
+  const createButton = $('#create-secrets-key');
+  const rotateButton = $('#rotate-secrets-key');
+  const status = $('#secrets-key-status');
+  status.className = 'settings-note status-line';
   if (key.configured) {
     const source = key.source === 'managed' ? 'DomainPosture' : key.source === 'external' ? 'an external Docker secret' : 'the deployment environment';
-    $('#secrets-key-status').textContent = `An encryption key is configured and provided by ${source}.`;
-    button.hidden = true;
+    status.innerHTML = `<span class="dot healthy" aria-hidden="true"></span><span>An encryption key is configured and provided by ${source}.</span>`;
+    createButton.hidden = true;
+    rotateButton.hidden = !key.can_rotate;
   } else {
-    $('#secrets-key-status').textContent = 'No encryption key is configured. Create one before saving a Discord webhook or report-mailbox password.';
-    button.hidden = !key.can_generate;
+    status.innerHTML = '<span class="dot critical" aria-hidden="true"></span><span>No encryption key is configured. Create one before saving a Discord webhook or report-mailbox password.</span>';
+    createButton.hidden = !key.can_generate;
+    rotateButton.hidden = true;
   }
+}
+
+function renderDiscordWebhookSettings(settings = state.settings) {
+  const source = settings?.notifications?.discord_webhook_source;
+  const configured = Boolean(settings?.notifications?.discord_webhook_configured);
+  const status = $('#discord-webhook-status');
+  const message = source === 'settings'
+    ? 'A webhook is saved in DomainPosture.'
+    : source === 'environment'
+      ? 'A webhook from the deployment environment is active.'
+      : 'No Discord webhook is configured.';
+  status.innerHTML = `<span class="dot ${configured ? 'healthy' : 'critical'}" aria-hidden="true"></span><span>${message}</span>`;
+  $('#discord-webhook-field').hidden = configured && !state.editingDiscordWebhook;
+  $('#change-discord-webhook').hidden = !configured || state.editingDiscordWebhook;
+  $('#test-discord-webhook').disabled = !configured;
 }
 
 async function loadSettings() {
@@ -475,13 +501,8 @@ async function loadSettings() {
   $('#attention-notifications-enabled').checked = settings.notifications.needs_attention_enabled;
   $('#ssl-warning-threshold').value = settings.notifications.ssl_warning_threshold;
   $('#discord-webhook').value = '';
-  $('#discord-webhook-clear').checked = false;
-  $('#discord-webhook-clear').disabled = settings.notifications.discord_webhook_source !== 'settings';
-  $('#discord-webhook-status').textContent = settings.notifications.discord_webhook_source === 'settings'
-    ? 'A webhook is saved in DomainPosture. Leave this blank to keep it.'
-    : settings.notifications.discord_webhook_source === 'environment'
-      ? 'A deployment environment webhook is active. Enter a URL to save an override in DomainPosture.'
-      : 'No webhook is configured. Enter a Discord webhook URL to save it securely.';
+  state.editingDiscordWebhook = false;
+  renderDiscordWebhookSettings(settings);
   $('#smtp-probe-hostname').value = settings.smtp_probe_hostname || '';
   $('#report-source').value = settings.report_source;
   $('#opensearch-url').value = settings.opensearch_url;
@@ -832,8 +853,7 @@ async function saveSettings(event) {
         ssl_enabled: $('#ssl-notifications-enabled').checked,
         needs_attention_enabled: $('#attention-notifications-enabled').checked,
         ssl_warning_threshold: Number($('#ssl-warning-threshold').value),
-        discord_webhook: $('#discord-webhook').value.trim(),
-        clear_discord_webhook: $('#discord-webhook-clear').checked
+        discord_webhook: $('#discord-webhook').value.trim()
       },
       smtp_probe_hostname: $('#smtp-probe-hostname').value.trim(),
       report_source: $('#report-source').value,
@@ -912,13 +932,8 @@ async function saveSettings(event) {
     state.settings = clone(result);
     renderSecretsKeySettings(result);
     $('#discord-webhook').value = '';
-    $('#discord-webhook-clear').checked = false;
-    $('#discord-webhook-clear').disabled = result.notifications.discord_webhook_source !== 'settings';
-    $('#discord-webhook-status').textContent = result.notifications.discord_webhook_source === 'settings'
-      ? 'A webhook is saved in DomainPosture. Leave this blank to keep it.'
-      : result.notifications.discord_webhook_source === 'environment'
-        ? 'A deployment environment webhook is active. Enter a URL to save an override in DomainPosture.'
-        : 'No webhook is configured. Enter a Discord webhook URL to save it securely.';
+    state.editingDiscordWebhook = false;
+    renderDiscordWebhookSettings(result);
     $('#imap-password').value = '';
     $('#imap-password-status').textContent = result.mailbox.password_set ? 'A password is saved. Leave this blank to keep it.' : 'No password is saved.';
     message.textContent = result.snapshot_notice || (result.parsedmarc_reload_automatic
@@ -986,6 +1001,19 @@ $('#refresh').onclick = async () => {
 $('#settings-form').addEventListener('submit', saveSettings);
 $('#domain-form').addEventListener('submit', saveDomain);
 document.querySelectorAll('input[type="checkbox"]').forEach(input => input.setAttribute('role', 'switch'));
+function showSecretsRecoveryKey(result, rotated = false) {
+  state.settings.secrets_key = { configured: true, source: result.source, can_generate: false, can_rotate: result.source === 'managed' };
+  renderSecretsKeySettings();
+  $('#secrets-key-kicker').textContent = rotated ? 'Rotated recovery key' : 'One-time recovery key';
+  $('#secrets-key-title').textContent = rotated ? 'Save the new key now' : 'Save this key now';
+  $('#secrets-key-description').textContent = rotated
+    ? 'Your saved settings remain available and now use this new key. This key will not be shown again. Save it in 1Password or another secure password manager. Keep the previous key only while you still need to restore backups encrypted with it.'
+    : 'This key will not be shown again. Save it in 1Password or another secure password manager. You will need it to recover encrypted settings from a backup.';
+  $('#generated-secrets-key').value = result.key;
+  $('#copy-secrets-key-status').textContent = '';
+  $('#secrets-key-dialog').showModal();
+  $('#copy-secrets-key').focus();
+}
 $('#create-secrets-key').onclick = async () => {
   const button = $('#create-secrets-key');
   button.disabled = true;
@@ -994,18 +1022,52 @@ $('#create-secrets-key').onclick = async () => {
     const response = await fetch('/api/secrets-key', { method: 'POST' });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Unable to create the encryption key.');
-    state.settings.secrets_key = { configured: true, source: result.source, can_generate: false };
-    renderSecretsKeySettings();
-    $('#generated-secrets-key').value = result.key;
-    $('#copy-secrets-key-status').textContent = '';
-    $('#secrets-key-dialog').showModal();
-    $('#copy-secrets-key').focus();
+    showSecretsRecoveryKey(result);
   } catch (error) {
-    $('#secrets-key-status').textContent = error.message;
-    $('#secrets-key-status').className = 'settings-note failure';
+    $('#secrets-key-status').innerHTML = `<span class="dot critical" aria-hidden="true"></span><span>${esc(error.message)}</span>`;
+    $('#secrets-key-status').className = 'settings-note status-line failure';
   } finally {
     button.disabled = false;
     button.textContent = 'Create encryption key';
+  }
+};
+$('#rotate-secrets-key').onclick = async () => {
+  if (!confirm('Rotate the DomainPosture encryption key now? Saved passwords and webhooks will be re-encrypted and preserved. Save the new recovery key when it appears.')) return;
+  const button = $('#rotate-secrets-key');
+  button.disabled = true;
+  button.textContent = 'Rotating…';
+  try {
+    const response = await fetch('/api/secrets-key/rotate', { method: 'POST' });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Unable to rotate the encryption key.');
+    showSecretsRecoveryKey(result, true);
+  } catch (error) {
+    $('#secrets-key-status').innerHTML = `<span class="dot critical" aria-hidden="true"></span><span>${esc(error.message)}</span>`;
+    $('#secrets-key-status').className = 'settings-note status-line failure';
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Rotate encryption key';
+  }
+};
+$('#change-discord-webhook').onclick = () => {
+  state.editingDiscordWebhook = true;
+  renderDiscordWebhookSettings();
+  $('#discord-webhook').focus();
+};
+$('#test-discord-webhook').onclick = async () => {
+  const button = $('#test-discord-webhook');
+  button.disabled = true;
+  button.textContent = 'Sending…';
+  try {
+    const response = await fetch('/api/notifications/discord/test', { method: 'POST' });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Unable to send the test notification.');
+    $('#discord-webhook-status').innerHTML = '<span class="dot healthy" aria-hidden="true"></span><span>A webhook is configured. Test notification sent.</span>';
+  } catch (error) {
+    $('#discord-webhook-status').innerHTML = `<span class="dot critical" aria-hidden="true"></span><span>${esc(error.message)}</span>`;
+  } finally {
+    button.textContent = 'Test notification';
+    button.disabled = !state.settings?.notifications?.discord_webhook_configured;
   }
 };
 $('#copy-secrets-key').onclick = async () => {
