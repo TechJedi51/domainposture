@@ -457,7 +457,14 @@ async function loadSettings() {
   $('#ssl-notifications-enabled').checked = settings.notifications.ssl_enabled;
   $('#attention-notifications-enabled').checked = settings.notifications.needs_attention_enabled;
   $('#ssl-warning-threshold').value = settings.notifications.ssl_warning_threshold;
-  $('#discord-webhook-status').textContent = settings.notifications.discord_webhook_configured ? 'Discord webhook: Configured' : 'Discord webhook: Not configured. Set DOMAINPOSTURE_DISCORD_WEBHOOK in the deployment environment.';
+  $('#discord-webhook').value = '';
+  $('#discord-webhook-clear').checked = false;
+  $('#discord-webhook-clear').disabled = settings.notifications.discord_webhook_source !== 'settings';
+  $('#discord-webhook-status').textContent = settings.notifications.discord_webhook_source === 'settings'
+    ? 'A webhook is saved in DomainPosture. Leave this blank to keep it.'
+    : settings.notifications.discord_webhook_source === 'environment'
+      ? 'A deployment environment webhook is active. Enter a URL to save an override in DomainPosture.'
+      : 'No webhook is configured. Enter a Discord webhook URL to save it securely.';
   $('#smtp-probe-hostname').value = settings.smtp_probe_hostname || '';
   $('#report-source').value = settings.report_source;
   $('#opensearch-url').value = settings.opensearch_url;
@@ -771,7 +778,9 @@ async function saveSettings(event) {
         discord_enabled: $('#discord-enabled').checked,
         ssl_enabled: $('#ssl-notifications-enabled').checked,
         needs_attention_enabled: $('#attention-notifications-enabled').checked,
-        ssl_warning_threshold: Number($('#ssl-warning-threshold').value)
+        ssl_warning_threshold: Number($('#ssl-warning-threshold').value),
+        discord_webhook: $('#discord-webhook').value.trim(),
+        clear_discord_webhook: $('#discord-webhook-clear').checked
       },
       smtp_probe_hostname: $('#smtp-probe-hostname').value.trim(),
       report_source: $('#report-source').value,
@@ -848,6 +857,14 @@ async function saveSettings(event) {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Unable to save settings');
     state.settings = clone(result);
+    $('#discord-webhook').value = '';
+    $('#discord-webhook-clear').checked = false;
+    $('#discord-webhook-clear').disabled = result.notifications.discord_webhook_source !== 'settings';
+    $('#discord-webhook-status').textContent = result.notifications.discord_webhook_source === 'settings'
+      ? 'A webhook is saved in DomainPosture. Leave this blank to keep it.'
+      : result.notifications.discord_webhook_source === 'environment'
+        ? 'A deployment environment webhook is active. Enter a URL to save an override in DomainPosture.'
+        : 'No webhook is configured. Enter a Discord webhook URL to save it securely.';
     $('#imap-password').value = '';
     $('#imap-password-status').textContent = result.mailbox.password_set ? 'A password is saved. Leave this blank to keep it.' : 'No password is saved.';
     message.textContent = result.snapshot_notice || (result.parsedmarc_reload_automatic

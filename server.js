@@ -457,21 +457,33 @@ async function saveOperationalState() {
   await atomicWrite(STATE_PATH, `${JSON.stringify(getOperationalState(), null, 2)}\n`);
 }
 
-function discordWebhookUrl() {
-  const value = String(process.env.DOMAINPOSTURE_DISCORD_WEBHOOK || process.env.MAILPOSTURE_DISCORD_WEBHOOK || '').trim();
+function validDiscordWebhookUrl(value) {
   try {
     const url = new URL(value);
     const allowedHosts = new Set(['discord.com', 'discordapp.com', 'canary.discord.com', 'ptb.discord.com']);
-    return url.protocol === 'https:' && allowedHosts.has(url.hostname) && url.pathname.startsWith('/api/webhooks/') ? url : null;
+    const validPath = /^\/api\/webhooks\/\d+\/[^/?#]+\/?$/.test(url.pathname);
+    return url.protocol === 'https:' && allowedHosts.has(url.hostname) && validPath && !url.username && !url.password && !url.search && !url.hash ? url : null;
   } catch (_) { return null; }
+}
+
+function discordWebhookConfiguration(secrets = readSecrets()) {
+  const saved = validDiscordWebhookUrl(String(secrets.discord_webhook || '').trim());
+  if (saved) return { url: saved, source: 'settings' };
+  const environment = validDiscordWebhookUrl(String(process.env.DOMAINPOSTURE_DISCORD_WEBHOOK || process.env.MAILPOSTURE_DISCORD_WEBHOOK || '').trim());
+  return { url: environment, source: environment ? 'environment' : null };
+}
+
+function discordWebhookUrl() {
+  return discordWebhookConfiguration().url;
 }
 
 function publicSettings(settings = getSettings()) {
   const secrets = readSecrets();
+  const discord = discordWebhookConfiguration(secrets);
   return {
     ...settings,
     mailbox: { ...settings.mailbox, password: '', password_set: Boolean(secrets.imap_password) },
-    notifications: { ...settings.notifications, discord_webhook_configured: Boolean(discordWebhookUrl()) }
+    notifications: { ...settings.notifications, discord_webhook_configured: Boolean(discord.url), discord_webhook_source: discord.source }
   };
 }
 
@@ -541,6 +553,15 @@ async function saveSettings(value) {
   const secrets = readSecrets();
   if (value.mailbox?.password) secrets.imap_password = textValue(value.mailbox.password, '', 4096);
   if (value.mailbox?.clear_password === true) delete secrets.imap_password;
+  const webhook = textValue(value.notifications?.discord_webhook, '', 2048);
+  const clearWebhook = value.notifications?.clear_discord_webhook === true;
+  if (webhook && clearWebhook) throw new Error('Enter a Discord webhook or remove the saved webhook, not both');
+  if (clearWebhook) delete secrets.discord_webhook;
+  else if (webhook) {
+    const validatedWebhook = validDiscordWebhookUrl(webhook);
+    if (!validatedWebhook) throw new Error('Discord webhook must be an HTTPS discord.com webhook URL without query parameters');
+    secrets.discord_webhook = validatedWebhook.toString();
+  }
   if (settings.mailbox.enabled && (!settings.mailbox.host || !settings.mailbox.username || !secrets.imap_password)) throw new Error('IMAP host, username, and password are required when report collection is enabled');
   await atomicWrite(SECRETS_PATH, `${JSON.stringify(secrets, null, 2)}\n`);
   await atomicWrite(SETTINGS_PATH, `${JSON.stringify(settings, null, 2)}\n`);
@@ -1383,4 +1404,4 @@ const server = http.createServer(async (req,res) => {
 });
 function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`DomainPosture listening on :${PORT}`); addDiagnosticEvent('domainposture', 'info', 'DomainPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeControlExceptions, normalizeSmtpProfiles, normalizeCertificateChecks, normalizeNotifications, activeBimiException, applyMissingControlException, isMissingMtaSts, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, domainScore, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, certificate, domainCertificateComponent, processNotifications, sameOriginRequest, refresh, getOperationalState, getSnapshot:()=>snapshot };
+module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeControlExceptions, normalizeSmtpProfiles, normalizeCertificateChecks, normalizeNotifications, validDiscordWebhookUrl, discordWebhookConfiguration, activeBimiException, applyMissingControlException, isMissingMtaSts, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, domainScore, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, certificate, domainCertificateComponent, processNotifications, sameOriginRequest, refresh, getOperationalState, getSnapshot:()=>snapshot };

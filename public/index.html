@@ -120,8 +120,9 @@
           <div class="field"><label for="smtp-probe-hostname">SMTP probe hostname</label><input id="smtp-probe-hostname" type="text" placeholder="probe.example.com"><p>Optional. Use a public hostname whose A/AAAA and PTR records identify this DomainPosture probe. When blank, DomainPosture sends its local address as an SMTP address literal.</p></div>
         </div>
         <div class="settings-panel">
-          <div><h2>Discord notifications</h2><p>Send state-transition alerts without exposing the webhook in the browser.</p></div>
-          <p id="discord-webhook-status" class="settings-note"></p>
+          <div><h2>Discord notifications</h2><p>Send state-transition alerts. The saved webhook is stored as a server-side secret and is never returned to the browser.</p></div>
+          <div class="field"><label for="discord-webhook">Webhook URL</label><input id="discord-webhook" type="password" inputmode="url" autocomplete="new-password" placeholder="Leave blank to keep the configured webhook"><p id="discord-webhook-status"></p></div>
+          <label class="toggle"><input id="discord-webhook-clear" type="checkbox"><span>Remove the webhook saved in DomainPosture</span></label>
           <label class="toggle"><input id="discord-enabled" type="checkbox"><span>Enable Discord notifications</span></label>
           <label class="toggle"><input id="ssl-notifications-enabled" type="checkbox"><span>Certificate milestone and recovery notifications</span></label>
           <label class="toggle"><input id="attention-notifications-enabled" type="checkbox"><span>Needs Attention and recovery notifications</span></label>

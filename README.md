@@ -98,13 +98,15 @@ The certificate interval can be changed under **Settings → Monitoring behavior
 
 ## Discord notifications
 
-Set the webhook only in the deployment environment:
+Enter the webhook under **Settings → Monitored domains → Discord notifications**. DomainPosture stores it in `/data/secrets.json` with the report-mailbox password and never returns its value to the browser. Leave the field blank to keep the current value, or select **Remove the webhook saved in DomainPosture** to delete it.
+
+For deployments that manage secrets outside the application, the environment variable remains supported as a fallback:
 
 ```text
 DOMAINPOSTURE_DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
 ```
 
-The webhook is never saved in settings, returned by the API, placed in HTML, or written to logs. The Settings screen reports only **Configured** or **Not configured**. Only HTTPS Discord webhook hosts and `/api/webhooks/` paths are accepted.
+Only HTTPS Discord webhook URLs with an approved Discord host and `/api/webhooks/<id>/<token>` path are accepted. A webhook saved through Settings takes precedence over the environment fallback. The URL is never returned by the API, placed in HTML, or written to logs; the Settings screen reports only whether it is saved in DomainPosture, supplied by the environment, or not configured.
 
 Notification controls are available in Settings for:
 
@@ -153,12 +155,12 @@ After deployment, open Settings, add domains and DKIM selectors, configure optio
 
 ## Environment variables
 
-The web interface manages domains, certificate paths, report history, refresh intervals, notification switches, mailbox options, and most OpenSearch settings. Deployment secrets and storage locations remain environment variables.
+The web interface manages domains, certificate paths, report history, refresh intervals, notification switches, the Discord webhook, mailbox options, and most OpenSearch settings. The OpenSearch password and storage locations remain deployment environment variables.
 
 | Variable | Purpose |
 |---|---|
 | `DOMAINPOSTURE_IMAGE` | DomainPosture container image |
-| `DOMAINPOSTURE_DISCORD_WEBHOOK` | Optional Discord webhook secret |
+| `DOMAINPOSTURE_DISCORD_WEBHOOK` | Optional Discord webhook fallback when none is saved in Settings |
 | `DOMAINPOSTURE_SETTINGS_PATH` | Optional standalone host path mounted at `/data` |
 | `DOMAINPOSTURE_DATA_VOLUME` | Optional Docker volume name for `/data` in the lightweight stack |
 | `OPENSEARCH_URL` | Existing OpenSearch URL |
@@ -199,7 +201,7 @@ Rollback is to stop the 3.0.0 containers and restart the prior image against the
 ## Data and privacy
 
 - `/data/settings.json` stores application configuration.
-- `/data/secrets.json` stores the report-mailbox password with restrictive file permissions.
+- `/data/secrets.json` stores the report-mailbox password and optional Discord webhook with restrictive file permissions.
 - `/data/domainposture-state.json` stores certificate cache and notification transition state.
 - ParseDMARC writes normalized reports to OpenSearch and controls mailbox archive/delete behavior.
 - DomainPosture shows RUF counts but intentionally does not display potentially sensitive report samples.
@@ -222,7 +224,7 @@ If a certificate check fails:
 5. Do not disable verification to hide a chain or hostname problem.
 6. Select **Check Now** after correcting the issue.
 
-If Discord is not sending messages, confirm the environment secret uses an HTTPS Discord webhook URL, the Settings page says **Configured**, notification switches are enabled, and the container can reach Discord. Existing actionable states do not alert immediately after an upgrade because the first scan establishes the deduplication baseline.
+If Discord is not sending messages, confirm Settings reports a saved or environment webhook, the notification switches are enabled, and the container can reach Discord. Existing actionable states do not alert immediately after an upgrade because the first scan establishes the deduplication baseline.
 
 ## Development and verification
 
@@ -233,7 +235,7 @@ node --check ssl-monitor.js
 node --check public/app.js
 ```
 
-The test suite covers settings migration, public/origin argument construction, input rejection, JSON normalization, distinct cached paths, status thresholds, score contribution, forced and scheduled-cache behavior, notification milestones, deduplication, recovery, UI wiring, and existing email posture behavior.
+The test suite covers settings migration, public/origin argument construction, input rejection, JSON normalization, distinct cached paths, status thresholds, score contribution, forced and scheduled-cache behavior, Discord webhook validation and precedence, notification milestones, deduplication, recovery, UI wiring, and existing email posture behavior.
 
 The integration follows the current upstream [ssl-watch documentation](https://github.com/idesyatov/ssl-watch) and pins version 1.17.2. Its MIT attribution is retained in `THIRD_PARTY_NOTICES.md`. The project uses semantic versioning; this DomainPosture feature release is `3.0.0`.
 

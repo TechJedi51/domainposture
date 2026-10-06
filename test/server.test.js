@@ -20,6 +20,17 @@ async function run(){
   assert.deepStrictEqual(settings.certificate_checks['example.com'],{check_public:true,check_origin:false,origin_ip:''});
   assert.strictEqual(settings.certificate_check_minutes,360);
   assert.strictEqual(settings.notifications.ssl_warning_threshold,30);
+  const discordUrl='https://discord.com/api/webhooks/123456789/test-token_value';
+  assert.strictEqual(app.validDiscordWebhookUrl(discordUrl).toString(),discordUrl);
+  assert.strictEqual(app.validDiscordWebhookUrl('http://discord.com/api/webhooks/123/token'),null);
+  assert.strictEqual(app.validDiscordWebhookUrl('https://discord.example/api/webhooks/123/token'),null);
+  assert.strictEqual(app.validDiscordWebhookUrl(`${discordUrl}?wait=true`),null);
+  process.env.DOMAINPOSTURE_DISCORD_WEBHOOK='https://discord.com/api/webhooks/222/environment-token';
+  assert.strictEqual(app.discordWebhookConfiguration({}).source,'environment');
+  const savedDiscord=app.discordWebhookConfiguration({discord_webhook:discordUrl});
+  assert.strictEqual(savedDiscord.source,'settings');
+  assert.strictEqual(savedDiscord.url.toString(),discordUrl);
+  delete process.env.DOMAINPOSTURE_DISCORD_WEBHOOK;
   const originSettings=app.normalizeSettings({monitored_domains:['example.com'],certificate_checks:{'example.com':{check_public:true,check_origin:true,origin_ip:'2001:db8::10'}}});
   assert.deepStrictEqual(originSettings.certificate_checks['example.com'],{check_public:true,check_origin:true,origin_ip:'2001:db8::10'});
   assert.throws(()=>app.normalizeSettings({monitored_domains:['example.com'],certificate_checks:{'example.com':{check_public:false,check_origin:false}}}),/at least one certificate check/i);
@@ -337,6 +348,8 @@ async function run(){
   assert.match(page,/id="check-origin-certificate"/);
   assert.match(page,/id="origin-ip"/);
   assert.match(page,/id="certificate-check-minutes"/);
+  assert.match(page,/id="discord-webhook"/);
+  assert.match(page,/id="discord-webhook-clear"/);
   assert.match(page,/id="discord-enabled"/);
   assert.match(page,/id="ssl-warning-threshold"/);
   assert.match(page,/IP and domain reputation/);
