@@ -4,11 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#07111b">
-  <title>MailPosture</title>
-  <link rel="icon" href="/mailposture.svg" type="image/svg+xml">
+  <title>DomainPosture</title>
+  <link rel="icon" href="/domainposture.svg" type="image/svg+xml">
   <script>
     (() => {
-      const mode = localStorage.getItem('mailposture-theme') || 'system';
+      const mode = localStorage.getItem('domainposture-theme') || localStorage.getItem('mailposture-theme') || 'system';
       const dark = matchMedia('(prefers-color-scheme: dark)').matches;
       document.documentElement.dataset.themeMode = mode;
       document.documentElement.dataset.theme = mode === 'system' ? (dark ? 'dark' : 'light') : mode;
@@ -20,8 +20,8 @@
 <body>
   <header>
     <a class="brand" href="/" data-route="/">
-      <img src="/mailposture.svg" alt="">
-      <span class="brand-copy"><strong>MailPosture</strong><small id="version">v2.2.0</small></span>
+      <img src="/domainposture.svg" alt="">
+      <span class="brand-copy"><strong>DomainPosture</strong><small id="version">v3.0.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
       <a class="toolbar-button" href="/" data-route="/"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span>Dashboard</span></a>
@@ -42,7 +42,7 @@
 
   <main id="dashboard-view" hidden>
     <section class="page-intro dashboard-intro">
-      <div><small>Organization overview</small><h1>Mail Security Dashboard</h1><p>One view of posture, domain health, and every issue that needs attention.</p></div>
+      <div><small>Organization overview</small><h1>Domain Health Dashboard</h1><p>One view of email authentication, certificate posture, and every issue that needs attention.</p></div>
       <div id="master-score" class="score master-score"></div>
     </section>
     <section class="overview-section">
@@ -75,7 +75,7 @@
 
   <main id="system-status-view" class="system-status-view" hidden>
     <section class="page-intro status-intro">
-      <div><small>Service diagnostics</small><h1>System Status</h1><p>Direct checks of MailPosture storage, OpenSearch, report indexes, and the ParseDMARC collector.</p></div>
+      <div><small>Service diagnostics</small><h1>System Status</h1><p>Direct checks of DomainPosture storage, ssl-watch, OpenSearch, report indexes, and the ParseDMARC collector.</p></div>
       <div id="system-status-summary" class="system-status-summary" aria-live="polite"></div>
     </section>
     <section class="overview-section">
@@ -83,12 +83,12 @@
       <div id="system-status-checks" class="system-status-grid"><div class="clear">Running system checks…</div></div>
     </section>
     <section class="overview-section diagnostic-section">
-      <div class="heading"><div><small>Diagnostics</small><h2>Event history</h2></div><label class="log-filter" for="log-service"><span>Service</span><select id="log-service"><option value="all">All services</option><option value="mailposture">MailPosture</option><option value="opensearch">OpenSearch</option><option value="parsedmarc">ParseDMARC</option></select></label></div>
-      <p class="diagnostic-note">Shows privacy-safe status changes from this MailPosture session. Entries are historical and do not replace the current status cards above. Passwords, message content, and raw container output are not included.</p>
+      <div class="heading"><div><small>Diagnostics</small><h2>Event history</h2></div><label class="log-filter" for="log-service"><span>Service</span><select id="log-service"><option value="all">All services</option><option value="domainposture">DomainPosture</option><option value="opensearch">OpenSearch</option><option value="parsedmarc">ParseDMARC</option></select></label></div>
+      <p class="diagnostic-note">Shows privacy-safe status changes from this DomainPosture session. Entries are historical and do not replace the current status cards above. Passwords, message content, and raw container output are not included.</p>
       <div id="system-log" class="system-log" aria-live="polite"><div class="clear">Loading diagnostics…</div></div>
     </section>
     <section class="overview-section diagnostic-section">
-      <div class="heading"><div><small>Service output</small><h2>Service logs</h2></div><div class="service-log-controls"><label class="log-filter" for="service-log-service"><span>Service</span><select id="service-log-service"><option value="mailposture">MailPosture</option><option value="opensearch">OpenSearch</option><option value="parsedmarc">ParseDMARC</option></select></label><button id="refresh-service-log" class="toolbar-button" type="button">Refresh log</button></div></div>
+      <div class="heading"><div><small>Service output</small><h2>Service logs</h2></div><div class="service-log-controls"><label class="log-filter" for="service-log-service"><span>Service</span><select id="service-log-service"><option value="domainposture">DomainPosture</option><option value="opensearch">OpenSearch</option><option value="parsedmarc">ParseDMARC</option></select></label><button id="refresh-service-log" class="toolbar-button" type="button">Refresh log</button></div></div>
       <p class="diagnostic-note">Shows the recent, redacted contents of the selected service’s mounted log files. Logs can still contain domain names, IP addresses, and mail-system metadata. Review them before sharing.</p>
       <div id="service-log" class="service-log" aria-live="polite"><div class="clear">Loading service log…</div></div>
     </section>
@@ -114,9 +114,18 @@
           <div id="settings-domain-list" class="editable-list"></div>
         </div>
         <div class="settings-panel">
-          <div><h2>Monitoring behavior</h2><p>Choose how much report history to show and how often MailPosture runs its checks.</p></div>
-          <div class="three-fields"><div class="field"><label for="report-days">Report history (days)</label><input id="report-days" type="number" min="1" max="365" required></div><div class="field"><label for="refresh-minutes">Refresh interval (minutes)</label><input id="refresh-minutes" type="number" min="1" max="1440" required></div><div class="field"><label for="request-timeout">Request timeout (milliseconds)</label><input id="request-timeout" type="number" min="1000" max="60000" step="100" required></div></div>
-          <div class="field"><label for="smtp-probe-hostname">SMTP probe hostname</label><input id="smtp-probe-hostname" type="text" placeholder="probe.example.com"><p>Optional. Use a public hostname whose A/AAAA and PTR records identify this MailPosture probe. When blank, MailPosture sends its local address as an SMTP address literal.</p></div>
+          <div><h2>Monitoring behavior</h2><p>Choose how much report history to show and how often DomainPosture runs its checks.</p></div>
+          <div class="three-fields"><div class="field"><label for="report-days">Report history (days)</label><input id="report-days" type="number" min="1" max="365" required></div><div class="field"><label for="refresh-minutes">Refresh interval (minutes)</label><input id="refresh-minutes" type="number" min="1" max="1440" required></div><div class="field"><label for="certificate-check-minutes">Certificate interval (minutes)</label><input id="certificate-check-minutes" type="number" min="5" max="10080" required></div></div>
+          <div class="field"><label for="request-timeout">Request timeout (milliseconds)</label><input id="request-timeout" type="number" min="1000" max="60000" step="100" required></div>
+          <div class="field"><label for="smtp-probe-hostname">SMTP probe hostname</label><input id="smtp-probe-hostname" type="text" placeholder="probe.example.com"><p>Optional. Use a public hostname whose A/AAAA and PTR records identify this DomainPosture probe. When blank, DomainPosture sends its local address as an SMTP address literal.</p></div>
+        </div>
+        <div class="settings-panel">
+          <div><h2>Discord notifications</h2><p>Send state-transition alerts without exposing the webhook in the browser.</p></div>
+          <p id="discord-webhook-status" class="settings-note"></p>
+          <label class="toggle"><input id="discord-enabled" type="checkbox"><span>Enable Discord notifications</span></label>
+          <label class="toggle"><input id="ssl-notifications-enabled" type="checkbox"><span>Certificate milestone and recovery notifications</span></label>
+          <label class="toggle"><input id="attention-notifications-enabled" type="checkbox"><span>Needs Attention and recovery notifications</span></label>
+          <div class="field"><label for="ssl-warning-threshold">SSL warning threshold (days)</label><input id="ssl-warning-threshold" type="number" min="7" max="365" required><p>Milestones are the configured threshold, 14 days, 7 days, expiration, invalidity, and check failure.</p></div>
         </div>
       </section>
 
@@ -126,13 +135,13 @@
           <fieldset class="theme-picker"><legend>Color mode</legend><label><input type="radio" name="theme" value="light"><span>☀ Light</span></label><label><input type="radio" name="theme" value="dark"><span>◐ Dark</span></label><label><input type="radio" name="theme" value="system"><span>◑ System</span></label></fieldset>
           <div><h3>Domain menu order</h3><p>Show domains by status priority or alphabetically.</p></div>
           <fieldset class="theme-picker domain-sort-picker"><legend>Domain menu order</legend><label><input type="radio" name="domain-sort" value="priority"><span>Priority</span></label><label><input type="radio" name="domain-sort" value="alphabetical"><span>Alphabetical</span></label></fieldset>
-          <p class="settings-note">MailPosture uses SEAL Systems blue for controls and navigation. Status colors remain distinct: red needs action, yellow needs review, and green is healthy.</p>
+          <p class="settings-note">DomainPosture uses SEAL Systems blue for controls and navigation. Status colors remain distinct: red needs action, yellow needs review, and green is healthy.</p>
         </div>
       </section>
 
       <section id="settings-panel-opensearch" class="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab-opensearch" hidden>
         <div class="settings-panel">
-          <div><h2>Report source</h2><p>Use the bundled report services or connect MailPosture to an existing OpenSearch service.</p></div>
+          <div><h2>Report source</h2><p>Use the bundled report services or connect DomainPosture to an existing OpenSearch service.</p></div>
           <div class="field"><label for="report-source">Source</label><select id="report-source"><option value="standalone">Bundled services</option><option value="external">External OpenSearch</option><option value="disabled">Live checks only</option></select></div>
           <div id="opensearch-fields" class="nested-settings">
             <div class="field"><label for="opensearch-url">OpenSearch URL</label><input id="opensearch-url" type="url" placeholder="http://parsedmarc-opensearch:9200"></div>
@@ -140,7 +149,7 @@
             <label class="toggle"><input id="opensearch-verify-tls" type="checkbox"><span>Verify the OpenSearch TLS certificate</span></label>
             <details><summary>Index patterns</summary><div class="nested-settings compact-settings"><div class="field"><label for="aggregate-index">DMARC aggregate</label><input id="aggregate-index" type="text"></div><div class="field"><label for="failure-index">DMARC failure</label><input id="failure-index" type="text"></div><div class="field"><label for="smtp-tls-index">SMTP TLS</label><input id="smtp-tls-index" type="text"></div></div></details>
           </div>
-          <p class="settings-note">The OpenSearch password remains a Dockhand secret. MailPosture never returns it to the browser.</p>
+          <p class="settings-note">The OpenSearch password remains a Dockhand secret. DomainPosture never returns it to the browser.</p>
         </div>
         <div class="settings-panel" id="snapshot-panel">
           <div><h2>OpenSearch snapshots</h2><p>Schedule automated snapshots and retention with OpenSearch’s built-in snapshot manager.</p></div>
@@ -162,7 +171,7 @@
             <div class="two-fields"><div class="field"><label for="reports-folder">Incoming reports folder</label><input id="reports-folder" type="text" value="INBOX"></div><div class="field"><label for="archive-folder">Archive folder</label><input id="archive-folder" type="text" value="Archive"></div></div>
             <label class="toggle"><input id="pm-watch" type="checkbox"><span>Continue watching for new reports</span></label>
             <p class="folder-preview"><strong>Managed archive folders</strong><span id="archive-preview">Archive/Aggregate · Archive/Failure · Archive/Invalid · Archive/SMTP-TLS · Archive/Unsaved</span></p>
-            <p class="settings-note"><strong>SMTP TLS flow:</strong> parsedmarc moves processed TLS-RPT messages to <span id="smtp-tls-folder">Archive/SMTP-TLS</span>. MailPosture reads their normalized results from the configured <code>smtp_tls*</code> OpenSearch index.</p>
+            <p class="settings-note"><strong>SMTP TLS flow:</strong> parsedmarc moves processed TLS-RPT messages to <span id="smtp-tls-folder">Archive/SMTP-TLS</span>. DomainPosture reads their normalized results from the configured <code>smtp_tls*</code> OpenSearch index.</p>
           </div>
           <p class="settings-note">One mailbox can receive reports for every monitored domain. Use aliases that deliver to this account rather than creating one account per domain.</p>
         </div>
@@ -185,7 +194,7 @@
     <section class="page-intro">
       <small>Guide and glossary</small>
       <h1>Help</h1>
-      <p>MailPosture turns mail-security records and reports into a prioritized, read-only status view.</p>
+      <p>DomainPosture turns domain, email-security, and certificate checks into a prioritized status view.</p>
     </section>
     <section class="help-section">
       <h2>Getting started</h2>
@@ -193,33 +202,33 @@
         <li><strong>Add domains.</strong><span>Open Settings and add every domain that appears after the @ in your organization’s From addresses.</span></li>
         <li><strong>Add selectors and endpoints.</strong><span>Edit each domain to add the DKIM selectors used by its senders and the TLS services whose certificates should be monitored.</span></li>
         <li><strong>Review the dashboard.</strong><span>Start with the master score and attention list, then open a domain to inspect evidence and the next recommended action.</span></li>
-        <li><strong>Resolve and recheck.</strong><span>Make DNS or service changes outside MailPosture, allow them to propagate, then select Run checks.</span></li>
+        <li><strong>Resolve and recheck.</strong><span>Make DNS or service changes outside DomainPosture, allow them to propagate, then select Run checks.</span></li>
       </ol>
     </section>
     <section class="help-section">
-      <div class="heading"><div><small>Checks</small><h2>What MailPosture evaluates</h2></div></div>
+      <div class="heading"><div><small>Checks</small><h2>What DomainPosture evaluates</h2></div></div>
       <div class="glossary-grid">
         <article><h3>DMARC</h3><p>Checks whether the domain publishes one valid DMARC policy, its enforcement level, coverage percentage, and aggregate-report destination.</p></article>
         <article><h3>SPF</h3><p>Checks for exactly one SPF record, expands include and redirect references, detects invalid or unsafe mechanisms, counts DNS-querying terms against the limit of 10, and identifies softfail or policies that authorize every sender.</p></article>
         <article><h3>DMARC aggregate reports</h3><p>Shows message volume, separate alignment rates for messages that passed and failed DMARC, stacked daily results, top failing sources, and the receiving services that supplied reports. A failed-message count here does not imply that a matching RUF report exists.</p></article>
-        <article><h3>Individual DMARC failure reports (RUF)</h3><p>Counts optional, message-level reports sent by some receiving providers. This count is separate from the failed-message total in aggregate reports. No matching index generally means that no RUF report has arrived, not that ParseDMARC failed. MailPosture does not display message samples because they can contain personal or confidential content.</p></article>
+        <article><h3>Individual DMARC failure reports (RUF)</h3><p>Counts optional, message-level reports sent by some receiving providers. This count is separate from the failed-message total in aggregate reports. No matching index generally means that no RUF report has arrived, not that ParseDMARC failed. DomainPosture does not display message samples because they can contain personal or confidential content.</p></article>
         <article><h3>DKIM</h3><p>Checks each configured selector for a published public key and reports missing, revoked, or weak RSA keys. Selectors must be entered because DNS cannot reliably discover them.</p></article>
         <article><h3>MTA-STS</h3><p>Checks the DNS signal, HTTPS policy file, policy mode, whether the policy covers every published MX host, and whether the active SMTP probe can negotiate STARTTLS with a trusted certificate for those hosts.</p></article>
-        <article><h3>TLS reporting</h3><p>Looks up <code>_smtp._tls</code>, requires exactly one TLSRPTv1 policy, validates its syntax, and validates each mailto or HTTPS rua destination. It also summarizes stacked SMTP session results, reporting organizations, and failure types from parsedmarc. The values count SMTP sessions, not messages. Processed reports normally move to <code>Archive/SMTP-TLS</code>; MailPosture reads the normalized OpenSearch data.</p></article>
-        <article><h3>SMTP service</h3><p>Tests each published MX host on TCP port 25 for reachability, a valid SMTP greeting, STARTTLS negotiation and certificate trust, and unauthenticated relay protection. Reverse DNS, banner alignment, and single-location timing are supporting diagnostics rather than universal provider requirements. Managed-provider PTR and banner names may legitimately differ from the customer-facing MX name. MailPosture negotiates STARTTLS before its envelope-only relay probe, uses the configured public probe hostname or a local address literal for EHLO, and stops before DATA, so it never sends a message.</p></article>
-        <article><h3>TLS certificates</h3><p>Connects to configured direct-TLS endpoints, validates trust, and reports days until expiration. SMTP STARTTLS for published MX hosts is tested separately by SMTP service diagnostics.</p></article>
-        <article><h3>BIMI</h3><p>Checks the BIMI record, DMARC prerequisites, HTTPS logo, safe SVG content, and whether a mark certificate URL is published. After validation, the logo appears on the BIMI control card through MailPosture’s same-origin image endpoint. You can independently ignore an intentionally self-asserted logo or intentionally absent logo permanently or for 1–120 months. Invalid records, unsafe logos, and unmet DMARC requirements remain actionable.</p></article>
+        <article><h3>TLS reporting</h3><p>Looks up <code>_smtp._tls</code>, requires exactly one TLSRPTv1 policy, validates its syntax, and validates each mailto or HTTPS rua destination. It also summarizes stacked SMTP session results, reporting organizations, and failure types from parsedmarc. The values count SMTP sessions, not messages. Processed reports normally move to <code>Archive/SMTP-TLS</code>; DomainPosture reads the normalized OpenSearch data.</p></article>
+        <article><h3>SMTP service</h3><p>Tests each published MX host on TCP port 25 for reachability, a valid SMTP greeting, STARTTLS negotiation and certificate trust, and unauthenticated relay protection. Reverse DNS, banner alignment, and single-location timing are supporting diagnostics rather than universal provider requirements. Managed-provider PTR and banner names may legitimately differ from the customer-facing MX name. DomainPosture negotiates STARTTLS before its envelope-only relay probe, uses the configured public probe hostname or a local address literal for EHLO, and stops before DATA, so it never sends a message.</p></article>
+        <article><h3>SSL/TLS certificates</h3><p>Uses ssl-watch to validate the public certificate resolved through DNS and, when configured, connects directly to an origin IP while retaining the domain for SNI and hostname verification. Public and origin results are stored independently. Additional direct-TLS endpoints remain supported.</p></article>
+        <article><h3>BIMI</h3><p>Checks the BIMI record, DMARC prerequisites, HTTPS logo, safe SVG content, and whether a mark certificate URL is published. After validation, the logo appears on the BIMI control card through DomainPosture’s same-origin image endpoint. You can independently ignore an intentionally self-asserted logo or intentionally absent logo permanently or for 1–120 months. Invalid records, unsafe logos, and unmet DMARC requirements remain actionable.</p></article>
         <article><h3>IP and domain reputation</h3><p>Screens the monitored domain and its receiving MX addresses against Spamhaus DBL, Spamhaus ZEN, and SpamCop through DNS. It is not a complete reputation score or a deliverability guarantee. Outbound sending services can use different IP addresses and should be checked separately. An unavailable provider is never reported as clean.</p></article>
       </div>
     </section>
     <section class="help-section">
       <div class="heading"><div><small>Troubleshooting</small><h2>System Status and logs</h2></div></div>
       <div class="glossary-grid">
-        <article><h3>Yellow single-node cluster</h3><p>A single OpenSearch node cannot place a replica beside its primary shard. System Status separates report, security-audit, internal, and other shards. When every primary and report shard is available, MailPosture labels the pipeline operational and identifies the yellow state as expected replica placement. Use monthly indexes, one shard, and zero replicas for new indexes on a single node. Keep replicas when you operate multiple data nodes.</p></article>
+        <article><h3>Yellow single-node cluster</h3><p>A single OpenSearch node cannot place a replica beside its primary shard. System Status separates report, security-audit, internal, and other shards. When every primary and report shard is available, DomainPosture labels the pipeline operational and identifies the yellow state as expected replica placement. Use monthly indexes, one shard, and zero replicas for new indexes on a single node. Keep replicas when you operate multiple data nodes.</p></article>
         <article><h3>Report index patterns</h3><p>The Report indexes card covers all domains because index patterns are shared by the OpenSearch cluster. Expand each pattern to see its matching indexes and document counts. An aggregate or SMTP TLS index should appear after the first matching report is processed. A missing optional RUF index is informational and needs no remedy unless you expected a provider to send one.</p></article>
-        <article><h3>Event history</h3><p>The in-app history records state changes detected by MailPosture for its own checks, OpenSearch, and the ParseDMARC heartbeat. Entries describe what happened at their displayed time and can remain visible after a service recovers. Use the current status cards above for the latest state. The history intentionally excludes secrets, email content, and unrestricted Docker logs.</p></article>
-        <article><h3>Service logs</h3><p>The standalone Compose file mounts recent MailPosture, OpenSearch, and ParseDMARC log files read-only into MailPosture. The viewer uses a fixed service list, limits output size, and redacts common secret labels. Logs can still contain domain names, IP addresses, and message metadata, so review them before sharing. External deployments must provide equivalent read-only mounts or leave this feature disabled.</p></article>
-        <article><h3>Source host names</h3><p>For failing DMARC sources, MailPosture first uses names and network ownership saved by parsedmarc, then attempts a reverse-DNS lookup. A missing name is normal when the address owner does not publish a PTR record. Treat a host name as supporting context, not proof of identity.</p></article>
+        <article><h3>Event history</h3><p>The in-app history records state changes detected by DomainPosture for its own checks, OpenSearch, and the ParseDMARC heartbeat. Entries describe what happened at their displayed time and can remain visible after a service recovers. Use the current status cards above for the latest state. The history intentionally excludes secrets, email content, and unrestricted Docker logs.</p></article>
+        <article><h3>Service logs</h3><p>The standalone Compose file mounts recent DomainPosture, OpenSearch, and ParseDMARC log files read-only into DomainPosture. The viewer uses a fixed service list, limits output size, and redacts common secret labels. Logs can still contain domain names, IP addresses, and message metadata, so review them before sharing. External deployments must provide equivalent read-only mounts or leave this feature disabled.</p></article>
+        <article><h3>Source host names</h3><p>For failing DMARC sources, DomainPosture first uses names and network ownership saved by parsedmarc, then attempts a reverse-DNS lookup. A missing name is normal when the address owner does not publish a PTR record. Treat a host name as supporting context, not proof of identity.</p></article>
       </div>
     </section>
     <section class="help-section">
@@ -235,7 +244,7 @@
         <div><dt>Posture score</dt><dd>A summary indicator weighted by control status. It helps prioritize work but does not replace the evidence shown for each check.</dd></div>
       </dl>
     </section>
-    <section class="help-section safety-note"><h2>What MailPosture changes</h2><p>MailPosture reads public DNS, HTTPS and TLS endpoints, and OpenSearch report data. SMTP diagnostics open a session to each published MX host and send only EHLO, MAIL FROM, RCPT TO, RSET, STARTTLS, and QUIT commands using reserved example addresses; they never send DATA or message content. The EHLO identity is the configured public probe hostname or a local address literal. In the standalone deployment, saving Settings writes parsedmarc’s active configuration, triggers an automatic parsedmarc reload, and manages the OpenSearch snapshot policy. parsedmarc—not MailPosture—moves report messages into its Archive subfolders.</p></section>
+    <section class="help-section safety-note"><h2>What DomainPosture changes</h2><p>DomainPosture reads public DNS, HTTPS and TLS endpoints, and OpenSearch report data. SMTP diagnostics open a session to each published MX host and send only EHLO, MAIL FROM, RCPT TO, RSET, STARTTLS, and QUIT commands using reserved example addresses; they never send DATA or message content. The EHLO identity is the configured public probe hostname or a local address literal. In the standalone deployment, saving Settings writes parsedmarc’s active configuration, triggers an automatic parsedmarc reload, and manages the OpenSearch snapshot policy. parsedmarc—not DomainPosture—moves report messages into its Archive subfolders.</p></section>
   </main>
 
   <dialog id="detail-dialog"><button class="close" type="button" aria-label="Close">×</button><div id="detail"></div></dialog>
@@ -246,9 +255,9 @@
       <div class="editor-heading"><small>Domain configuration</small><h2 id="domain-editor-title">Add domain</h2></div>
       <div class="field"><label for="domain-name">Domain name</label><input id="domain-name" type="text" placeholder="example.com" autocomplete="off" required></div>
       <section class="editor-section">
-        <div><h3>Mail hosting and SMTP probes</h3><p>Choose who controls the inbound mail servers. Automatic detection recognizes Google Workspace, Microsoft 365, Hover Mail, iCloud Mail, and self-hosted MX names. Select Kerio Connect when MailPosture cannot identify the server software from DNS.</p></div>
+        <div><h3>Mail hosting and SMTP probes</h3><p>Choose who controls the inbound mail servers. Automatic detection recognizes Google Workspace, Microsoft 365, Hover Mail, iCloud Mail, and self-hosted MX names. Select Kerio Connect when DomainPosture cannot identify the server software from DNS.</p></div>
         <div class="two-fields"><div class="field"><label for="smtp-hosting-type">Hosting type</label><select id="smtp-hosting-type"><option value="auto">Detect automatically</option><option value="self_hosted">Self-hosted</option><option value="managed">Managed provider</option><option value="no_inbound">Does not receive mail</option></select></div><div class="field"><label for="smtp-provider">Provider</label><select id="smtp-provider"><option value="auto">Detect automatically</option><option value="kerio">Kerio Connect</option><option value="google">Google Workspace</option><option value="microsoft">Microsoft 365</option><option value="hover">Hover Mail</option><option value="icloud">iCloud Mail</option><option value="self_hosted">Self-hosted</option><option value="other">Other provider</option></select></div></div>
-        <div id="smtp-expected-host-field" class="field"><label for="smtp-expected-host">Expected server identity</label><input id="smtp-expected-host" type="text" placeholder="mail.example.com"><p>Optional for self-hosted services. MailPosture compares the PTR and SMTP banner with this hostname.</p></div>
+        <div id="smtp-expected-host-field" class="field"><label for="smtp-expected-host">Expected server identity</label><input id="smtp-expected-host" type="text" placeholder="mail.example.com"><p>Optional for self-hosted services. DomainPosture compares the PTR and SMTP banner with this hostname.</p></div>
         <div class="field"><label for="smtp-relay-context">Probe network location</label><select id="smtp-relay-context"><option value="auto">Not specified</option><option value="external">External and untrusted</option><option value="internal">Internal or trusted</option></select><p>An accepted external recipient is critical only when this installation is known to run outside the mail server’s trusted network.</p></div>
         <p class="settings-note">Provider selection changes responsibility and recommendations, but it never suppresses definite MX, STARTTLS, certificate, or externally confirmed relay failures.</p>
       </section>
@@ -258,16 +267,20 @@
         <div class="inline-editor"><input id="selector-input" type="text" placeholder="selector1" aria-label="DKIM selector"><button id="selector-add" class="symbol-button" type="button" aria-label="Add DKIM selector" title="Add selector">＋</button></div>
       </section>
       <section class="editor-section">
-        <div><h3>TLS certificates</h3><p>Add every direct-TLS host and port whose certificate should be monitored.</p></div>
+        <div><h3>Domain certificates</h3><p>Public uses normal DNS. Origin connects to the specified IP while validating this domain through TLS SNI.</p></div>
+        <label class="toggle"><input id="check-public-certificate" type="checkbox"><span>Check Public Certificate</span></label>
+        <label class="toggle"><input id="check-origin-certificate" type="checkbox"><span>Check Origin Certificate</span></label>
+        <div id="origin-ip-field" class="field" hidden><label for="origin-ip">Origin IP</label><input id="origin-ip" type="text" inputmode="text" placeholder="192.0.2.10"><p>Required for origin checking. IPv4 and IPv6 are supported.</p></div>
+      </section>
+      <section class="editor-section">
+        <div><h3>Additional TLS endpoints</h3><p>Optional. Add direct-TLS services such as HTTPS 443, SMTP 465, or IMAP 993.</p></div>
         <div id="endpoint-list" class="editable-list compact-list"></div>
         <div class="inline-editor endpoint-editor"><input id="endpoint-host" type="text" placeholder="mail.example.com" aria-label="TLS host"><input id="endpoint-port" type="number" min="1" max="65535" value="443" aria-label="TLS port"><button id="endpoint-add" class="symbol-button" type="button" aria-label="Add TLS endpoint" title="Add endpoint">＋</button></div>
       </section>
       <section class="editor-section">
-        <div><h3>Mail security review exceptions</h3><p>Ignore intentionally absent MTA-STS or TLS certificate monitoring. A partially configured or invalid MTA-STS policy and a failing, untrusted, or expiring configured certificate still need attention.</p></div>
+        <div><h3>Mail security review exceptions</h3><p>Ignore an intentionally absent MTA-STS policy. A partially configured or invalid policy still needs attention.</p></div>
         <div class="field"><label for="mta-sts-ignore-mode">No MTA-STS configuration</label><select id="mta-sts-ignore-mode"><option value="none">Continue showing Needs action</option><option value="temporary">Ignore for a set period</option><option value="permanent">Ignore permanently</option></select></div>
         <div id="mta-sts-ignore-months-field" class="field" hidden><label for="mta-sts-ignore-months">Number of months</label><input id="mta-sts-ignore-months" type="number" min="1" max="120" value="6"><p id="mta-sts-ignore-expiration"></p></div>
-        <div class="field"><label for="tls-certificates-ignore-mode">No TLS certificate endpoints</label><select id="tls-certificates-ignore-mode"><option value="none">Continue showing Review</option><option value="temporary">Ignore for a set period</option><option value="permanent">Ignore permanently</option></select></div>
-        <div id="tls-certificates-ignore-months-field" class="field" hidden><label for="tls-certificates-ignore-months">Number of months</label><input id="tls-certificates-ignore-months" type="number" min="1" max="120" value="6"><p id="tls-certificates-ignore-expiration"></p></div>
         <p class="settings-note">Ignored controls remain visible and labeled Ignored. They are removed from the attention queue and do not lower the posture score.</p>
       </section>
       <section class="editor-section">
@@ -283,7 +296,7 @@
     </form>
   </dialog>
 
-  <footer><span>MailPosture</span><span>Actionable email security monitoring</span></footer>
+  <footer><span>DomainPosture</span><span>Actionable domain health monitoring</span></footer>
   <script src="/app.js" defer></script>
 </body>
 </html>

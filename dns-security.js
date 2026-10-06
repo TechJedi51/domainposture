@@ -104,7 +104,7 @@ async function inspectSpfDomain(domain, resolver, state, depth = 0, path = new S
   const expansions = [];
   for (const target of references) {
     if (target.includes('%{')) {
-      state.warnings.push(`${domain} uses a macro-based SPF reference that MailPosture cannot expand statically.`);
+      state.warnings.push(`${domain} uses a macro-based SPF reference that DomainPosture cannot expand statically.`);
       continue;
     }
     if (!/^(?=.{1,253}$)(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(target)) {
@@ -112,7 +112,7 @@ async function inspectSpfDomain(domain, resolver, state, depth = 0, path = new S
       continue;
     }
     if (state.records.length >= 20) {
-      state.errors.push('SPF expansion exceeded the MailPosture safety limit.');
+      state.errors.push('SPF expansion exceeded the DomainPosture safety limit.');
       break;
     }
     expansions.push(inspectSpfDomain(target, resolver, state, depth + 1, nextPath));
@@ -126,9 +126,9 @@ async function spfCheck(domain, options = {}) {
   await inspectSpfDomain(domain, resolver, state);
   if (state.lookupCount > 10) state.errors.push(`Expanded SPF policy requires at least ${state.lookupCount} DNS-querying terms; the limit is 10.`);
   const evidence = { records: state.records, dns_lookup_terms: state.lookupCount, hard_fail: state.hardFail, soft_fail: state.softFail, warnings: state.warnings, errors: state.errors, temporary_errors: state.temporaryErrors, mail_profile: options.mail_profile || null };
-  if (state.temporaryErrors.length && !state.records.length) return result('spf', 'SPF', 'warning', 'DNS check unavailable', state.temporaryErrors.join(' '), 'Retry the check and verify DNS resolution from the MailPosture container.', evidence);
+  if (state.temporaryErrors.length && !state.records.length) return result('spf', 'SPF', 'warning', 'DNS check unavailable', state.temporaryErrors.join(' '), 'Retry the check and verify DNS resolution from the DomainPosture container.', evidence);
   if (state.errors.length) return result('spf', 'SPF', 'critical', 'Invalid policy', state.errors.join(' '), 'Correct the SPF record, then run the check again. Keep recursive DNS-querying terms at 10 or fewer.', evidence);
-  if (state.temporaryErrors.length) return result('spf', 'SPF', 'warning', 'Validation incomplete', state.temporaryErrors.join(' '), 'Retry the check and verify DNS resolution from the MailPosture container.', evidence);
+  if (state.temporaryErrors.length) return result('spf', 'SPF', 'warning', 'Validation incomplete', state.temporaryErrors.join(' '), 'Retry the check and verify DNS resolution from the DomainPosture container.', evidence);
   const hoverSoftFail = state.softFail && state.warnings.length === 1 && options.mail_profile?.hosting_type === 'managed' && options.mail_profile?.provider === 'hover';
   if (hoverSoftFail) return result('spf', 'SPF', 'info', 'Valid Hover policy · softfail', 'The policy is valid and uses Hover’s documented ~all ending. Changing it independently could reject legitimate provider traffic.', 'Keep the Hover-provided SPF policy unless Hover supplies a replacement. Recheck it when sending services change.', { ...evidence, provider_exception: 'hover_softfail' });
   if (state.warnings.length) return result('spf', 'SPF', 'warning', state.hardFail ? 'Valid, with review items' : 'Policy needs review', state.warnings.join(' '), state.hardFail ? 'Review the warnings and confirm every legitimate sender remains authorized.' : options.mail_profile?.hosting_type === 'managed' ? 'Confirm the required policy with the mail provider before changing its final qualifier.' : 'Move toward -all after confirming every legitimate sender is authorized.', evidence);

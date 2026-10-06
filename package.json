@@ -1,8 +1,8 @@
 {
-  "name": "mailposture",
-  "version": "2.2.0",
+  "name": "domainposture",
+  "version": "3.0.0",
   "private": true,
-  "description": "Actionable mail-domain security status page",
+  "description": "Actionable domain, email, and certificate health monitoring",
   "main": "server.js",
   "scripts": { "start": "node server.js", "test": "node test/server.test.js" },
   "engines": { "node": ">=20" }

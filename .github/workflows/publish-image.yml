@@ -1,4 +1,4 @@
-name: Test and publish container image
+name: Test and publish DomainPosture image
 
 on:
   push:

@@ -1,7 +1,8 @@
 'use strict';
 
 const $ = selector => document.querySelector(selector);
-const state = { data: null, system: null, logs: [], serviceLogs: null, selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/', domainSort: localStorage.getItem('mailposture-domain-sort') === 'alphabetical' ? 'alphabetical' : 'priority' };
+const storedDomainSort = localStorage.getItem('domainposture-domain-sort') || localStorage.getItem('mailposture-domain-sort');
+const state = { data: null, system: null, logs: [], serviceLogs: null, selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/', domainSort: storedDomainSort === 'alphabetical' ? 'alphabetical' : 'priority' };
 const names = { critical: 'Needs action', warning: 'Review', healthy: 'Healthy', info: 'Info', ignored: 'Ignored' };
 const themeQuery = matchMedia('(prefers-color-scheme: dark)');
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]);
@@ -44,6 +45,7 @@ function ago(value) {
 }
 
 function score(domain) {
+  if (Number.isFinite(Number(domain.score))) return Number(domain.score);
   const weights = { critical: 0, warning: .55, info: 1, ignored: 1, healthy: 1 };
   return domain.checks.length ? Math.round(domain.checks.reduce((total, check) => total + weights[check.status], 0) / domain.checks.length * 100) : 0;
 }
@@ -67,7 +69,7 @@ function renderDomainMenu() {
 
 function setDomainSort(mode, persist = true) {
   state.domainSort = mode === 'alphabetical' ? 'alphabetical' : 'priority';
-  if (persist) localStorage.setItem('mailposture-domain-sort', state.domainSort);
+  if (persist) localStorage.setItem('domainposture-domain-sort', state.domainSort);
   document.querySelectorAll('input[name="domain-sort"]').forEach(input => { input.checked = input.value === state.domainSort; });
   renderDomainMenu();
 }
@@ -182,7 +184,7 @@ function setTheme(mode, persist = true) {
   document.documentElement.dataset.themeMode = normalized;
   document.documentElement.dataset.theme = resolved;
   document.querySelector('meta[name="theme-color"]').content = resolved === 'dark' ? '#07111b' : '#f4f7fb';
-  if (persist) localStorage.setItem('mailposture-theme', normalized);
+  if (persist) localStorage.setItem('domainposture-theme', normalized);
   document.querySelectorAll('input[name="theme"]').forEach(input => { input.checked = input.value === normalized; });
 }
 
@@ -224,6 +226,20 @@ function renderDashboard() {
   $('#organization-reports').innerHTML = `${aggregateCard(reports.aggregate)}${smtpTlsCard(reports.smtp_tls)}${dmarcReportersCard(reports.aggregate)}${failureCard(reports.failure)}${reportingOrganizationsCard(reports.smtp_tls)}`;
 }
 
+function certificateResultMarkup(certificate) {
+  if (!certificate) return '';
+  const type = certificate.check_type === 'origin' ? 'Origin' : 'Public';
+  const expires = certificate.not_after ? new Date(certificate.not_after).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : 'Unavailable';
+  const checked = certificate.checked_at ? new Date(certificate.checked_at).toLocaleString() : 'Not checked';
+  const days = Number.isFinite(Number(certificate.days_remaining)) ? `${number(certificate.days_remaining)} days` : '—';
+  return `<section class="certificate-result ${esc(certificate.status)}"><div class="certificate-result-heading"><strong>${esc(type)}</strong><span>${esc(certificate.status_label || certificate.status)}</span></div><dl><div><dt>Expires</dt><dd>${esc(expires)}</dd></div><div><dt>Days remaining</dt><dd>${esc(days)}</dd></div><div><dt>Issuer</dt><dd>${esc(certificate.issuer || 'Unavailable')}</dd></div><div><dt>IP used</dt><dd>${esc(certificate.ip_used || 'Unavailable')}</dd></div><div><dt>Checked</dt><dd>${esc(checked)}</dd></div>${certificate.error ? `<div class="certificate-error"><dt>Issue</dt><dd>${esc(certificate.error)}</dd></div>` : ''}</dl></section>`;
+}
+
+function certificateControlCard(check, domain) {
+  const certificates = check.evidence?.checks || [];
+  return `<article class="card certificate-control ${esc(check.status)}"><div class="card-content"><div class="card-top"><span class="label">${esc(check.label)}</span><span class="state ${esc(check.status)}">${esc(names[check.status])}</span></div><h3>${esc(check.summary)}</h3><p>${esc(check.detail)}</p><div class="certificate-results">${certificates.map(certificateResultMarkup).join('')}</div><div class="certificate-actions"><button type="button" class="secondary" data-check="${esc(check.id)}">View details</button><button type="button" data-check-now="${esc(domain)}">Check Now</button></div></div></article>`;
+}
+
 function renderDomain() {
   const data = state.data;
   if (!data) return;
@@ -237,7 +253,7 @@ function renderDomain() {
     return;
   }
   if (!data.domains.length) {
-    $('#hero').innerHTML = '<div><small>Configuration needed</small><h1>Add your first mail domain.</h1><p>Open Settings to choose domains, selectors, and certificate endpoints.</p><a class="primary-link" href="/settings" data-route="/settings">Open Settings →</a></div>';
+    $('#hero').innerHTML = '<div><small>Configuration needed</small><h1>Add your first domain.</h1><p>Open Settings to choose the domain, mail controls, and certificate paths.</p><a class="primary-link" href="/settings" data-route="/settings">Open Settings →</a></div>';
     $('#checks').innerHTML = '';
     $('#attention').innerHTML = '<div class="clear">No domains are configured yet.</div>';
     $('#domain-issue-count').textContent = 'Clear';
@@ -248,12 +264,13 @@ function renderDomain() {
   const domain = data.domains[state.selected];
   const issues = issuesFor(domain);
   const posture = score(domain);
-  const issueHeading = domain.counts.critical ? `${domain.counts.critical} issue${domain.counts.critical === 1 ? ' needs' : 's need'} attention.` : domain.counts.warning ? 'Protected, with room to improve.' : 'Mail controls look solid.';
-  $('#hero').innerHTML = `<div><small>${esc(domain.domain)} · Current posture</small><h1>${issueHeading}</h1><p>Live policy checks and observed authentication results, translated into the next useful action.</p>${mailProfileMarkup(domain.mail_profile || {})}</div><div class="score"><span class="score-watermark status-symbol ${esc(domain.status)}" aria-hidden="true"></span><div class="score-content"><strong>${posture}</strong><span>Posture score out of 100</span><div class="bar"><i style="width:${posture}%"></i></div></div></div>`;
+  const issueHeading = domain.counts.critical ? `${domain.counts.critical} issue${domain.counts.critical === 1 ? ' needs' : 's need'} attention.` : domain.counts.warning ? 'Protected, with room to improve.' : 'Domain controls look solid.';
+  $('#hero').innerHTML = `<div><small>${esc(domain.domain)} · Current posture</small><h1>${issueHeading}</h1><p>Live policy, certificate, and observed authentication results, translated into the next useful action.</p>${mailProfileMarkup(domain.mail_profile || {})}<button type="button" class="hero-check-now" data-check-now="${esc(domain.domain)}">Check Now</button></div><div class="score"><span class="score-watermark status-symbol ${esc(domain.status)}" aria-hidden="true"></span><div class="score-content"><strong>${posture}</strong><span>Domain Score out of 100</span><div class="bar"><i style="width:${posture}%"></i></div></div></div>`;
   $('#domain-issue-count').textContent = issues.length ? `${issues.length} open` : 'Clear';
   $('#attention').innerHTML = issues.length ? issues.map(check => `<article class="issue ${check.status}"><span class="issue-status">${statusSymbol(check.status)}</span><span class="control">${esc(check.label)}</span><div><h3>${esc(check.summary)}</h3><p>${esc(check.action)}</p></div><button class="view" data-check="${esc(check.id)}">View →</button></article>`).join('') : '<div class="clear">No immediate actions. Every configured control passed its threshold.</div>';
   renderDomainMenu();
   $('#checks').innerHTML = domain.checks.map(check => {
+    if (check.id === 'ssl_certificates') return certificateControlCard(check, domain.domain);
     const endpoint = tlsEndpoint(check, domain.domain);
     const days = check.label === 'TLS certificate' && Number.isFinite(Number(check.evidence?.days_remaining)) ? Number(check.evidence.days_remaining) : null;
     const bimiLogo = check.id === 'bimi' && check.evidence?.logo_available ? `<img class="bimi-logo" src="/api/bimi-logo?domain=${encodeURIComponent(domain.domain)}" alt="BIMI logo for ${esc(domain.domain)}">` : '';
@@ -279,7 +296,7 @@ function systemSettingsSection(check) {
 
 function systemCheckDetails(check) {
   if (check.id === 'opensearch' && check.evidence?.unassigned_breakdown?.length) {
-    return `<div class="system-breakdown"><strong>Unassigned shard breakdown</strong><ul>${check.evidence.unassigned_breakdown.map(group => `<li><span>${esc(group.category)}</span><b>${number(group.unassigned_shards)} shard${Number(group.unassigned_shards) === 1 ? '' : 's'} across ${number(group.index_count)} index${Number(group.index_count) === 1 ? '' : 'es'} · ${number(group.primary_shards)} primary, ${number(group.replica_shards)} replica</b></li>`).join('')}</ul>${check.evidence.affected_report_shards === 0 ? '<p>No MailPosture report shard is affected.</p>' : `<p>${number(check.evidence.affected_report_shards)} report shard${Number(check.evidence.affected_report_shards) === 1 ? ' is' : 's are'} affected.</p>`}</div>`;
+    return `<div class="system-breakdown"><strong>Unassigned shard breakdown</strong><ul>${check.evidence.unassigned_breakdown.map(group => `<li><span>${esc(group.category)}</span><b>${number(group.unassigned_shards)} shard${Number(group.unassigned_shards) === 1 ? '' : 's'} across ${number(group.index_count)} index${Number(group.index_count) === 1 ? '' : 'es'} · ${number(group.primary_shards)} primary, ${number(group.replica_shards)} replica</b></li>`).join('')}</ul>${check.evidence.affected_report_shards === 0 ? '<p>No DomainPosture report shard is affected.</p>' : `<p>${number(check.evidence.affected_report_shards)} report shard${Number(check.evidence.affected_report_shards) === 1 ? ' is' : 's are'} affected.</p>`}</div>`;
   }
   if (check.id === 'report_indices' && check.evidence?.patterns) {
     const patterns = check.evidence.patterns.map(item => {
@@ -325,7 +342,7 @@ function renderSystemLogs() {
   if (!container) return;
   const service = $('#log-service')?.value || 'all';
   const events = (state.logs || []).filter(event => service === 'all' || event.service === service);
-  container.innerHTML = events.length ? events.map(event => `<article class="log-entry ${esc(event.level)}"><time datetime="${esc(event.timestamp)}">${esc(new Date(event.timestamp).toLocaleString())}</time><span>${statusSymbol(event.level === 'error' ? 'critical' : event.level === 'warning' ? 'warning' : 'healthy', event.level)}</span><strong>${esc(event.service)}</strong><div><h3>${esc(event.message)}</h3>${event.detail ? `<p>${esc(event.detail)}</p>` : ''}</div></article>`).join('') : '<div class="clear">No diagnostic changes have been recorded for this service during the current MailPosture session.</div>';
+  container.innerHTML = events.length ? events.map(event => `<article class="log-entry ${esc(event.level)}"><time datetime="${esc(event.timestamp)}">${esc(new Date(event.timestamp).toLocaleString())}</time><span>${statusSymbol(event.level === 'error' ? 'critical' : event.level === 'warning' ? 'warning' : 'healthy', event.level)}</span><strong>${esc(event.service)}</strong><div><h3>${esc(event.message)}</h3>${event.detail ? `<p>${esc(event.detail)}</p>` : ''}</div></article>`).join('') : '<div class="clear">No diagnostic changes have been recorded for this service during the current DomainPosture session.</div>';
 }
 
 async function loadSystemLogs() {
@@ -335,7 +352,7 @@ async function loadSystemLogs() {
     if (!response.ok) throw new Error(data.error || 'Unable to load diagnostics');
     state.logs = data.events || [];
   } catch (error) {
-    state.logs = [{ timestamp: new Date().toISOString(), service: 'mailposture', level: 'error', message: 'Diagnostic log unavailable', detail: error.message }];
+    state.logs = [{ timestamp: new Date().toISOString(), service: 'domainposture', level: 'error', message: 'Diagnostic log unavailable', detail: error.message }];
   }
   renderSystemLogs();
 }
@@ -353,7 +370,7 @@ function renderServiceLogs() {
 }
 
 async function loadServiceLogs() {
-  const service = $('#service-log-service')?.value || 'mailposture';
+  const service = $('#service-log-service')?.value || 'domainposture';
   const container = $('#service-log');
   if (container) container.innerHTML = '<div class="clear">Loading service log…</div>';
   try {
@@ -414,6 +431,7 @@ function renderSettingsDomains() {
     const selectors = settings.dkim_selectors[domain] || [];
     const endpoints = settings.tls_endpoints[domain] || [];
     const smtpProfile = settings.smtp_profiles?.[domain] || { hosting_type: 'auto', provider: 'auto' };
+    const certificate = settings.certificate_checks?.[domain] || { check_public: true, check_origin: false, origin_ip: '' };
     const configured = settings.bimi_exceptions?.[domain] || {};
     const exceptions = [configured.self_asserted || (configured.mode ? configured : null), configured.no_logo].filter(value => value?.mode);
     const controlExceptions = Object.values(settings.control_exceptions?.[domain] || {}).filter(value => value?.mode);
@@ -421,7 +439,8 @@ function renderSettingsDomains() {
     const exceptionNote = active.length ? ` · ${active.length} review exception${active.length === 1 ? '' : 's'}` : '';
     const detectedProfile = state.data?.domains?.find(item => item.domain === domain)?.mail_profile;
     const mailNote = detectedProfile ? mailProfileText(detectedProfile) : `Hosting type: ${hostingLabels[smtpProfile.hosting_type] || 'Automatic'} (${smtpProfile.hosting_type === 'auto' ? 'Auto-detected' : 'Selected'}) · Provider: ${providerLabels[smtpProfile.provider] || 'Automatic'} (${smtpProfile.provider === 'auto' ? 'Auto-detected' : 'Selected'})`;
-    return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${esc(mailNote)} · ${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} TLS certificate${endpoints.length === 1 ? '' : 's'}${esc(exceptionNote)}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
+    const certificateNote = `${certificate.check_public ? 'Public certificate' : ''}${certificate.check_public && certificate.check_origin ? ' + ' : ''}${certificate.check_origin ? `Origin certificate (${certificate.origin_ip})` : ''}`;
+    return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${esc(mailNote)} · ${esc(certificateNote)} · ${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} additional TLS endpoint${endpoints.length === 1 ? '' : 's'}${esc(exceptionNote)}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
   }).join('') : '<div class="empty-list"><p>No domains are configured.</p><button type="button" data-add-domain>Add a domain</button></div>';
 }
 
@@ -432,7 +451,13 @@ async function loadSettings() {
   state.settings = clone(settings);
   $('#report-days').value = settings.report_days;
   $('#refresh-minutes').value = settings.refresh_minutes;
+  $('#certificate-check-minutes').value = settings.certificate_check_minutes;
   $('#request-timeout').value = settings.request_timeout_ms;
+  $('#discord-enabled').checked = settings.notifications.discord_enabled;
+  $('#ssl-notifications-enabled').checked = settings.notifications.ssl_enabled;
+  $('#attention-notifications-enabled').checked = settings.notifications.needs_attention_enabled;
+  $('#ssl-warning-threshold').value = settings.notifications.ssl_warning_threshold;
+  $('#discord-webhook-status').textContent = settings.notifications.discord_webhook_configured ? 'Discord webhook: Configured' : 'Discord webhook: Not configured. Set DOMAINPOSTURE_DISCORD_WEBHOOK in the deployment environment.';
   $('#smtp-probe-hostname').value = settings.smtp_probe_hostname || '';
   $('#report-source').value = settings.report_source;
   $('#opensearch-url').value = settings.opensearch_url;
@@ -490,7 +515,7 @@ async function loadSettings() {
   $('#snapshot-retention').value = settings.snapshots.retention_days;
   $('#snapshot-min').value = settings.snapshots.min_count;
   $('#snapshot-max').value = settings.snapshots.max_count;
-  setTheme(localStorage.getItem('mailposture-theme') || 'system', false);
+  setTheme(localStorage.getItem('domainposture-theme') || localStorage.getItem('mailposture-theme') || 'system', false);
   renderSettingsDomains();
   updateSettingsVisibility();
   state.settingsLoaded = true;
@@ -531,16 +556,18 @@ function openDomainEditor(index = null) {
   const exceptions = { self_asserted: configured.self_asserted || (configured.mode ? configured : null), no_logo: configured.no_logo || null };
   const controlExceptions = clone(state.settings.control_exceptions?.[domain] || {});
   const smtpProfile = clone(state.settings.smtp_profiles?.[domain] || { hosting_type: 'auto', provider: 'auto', expected_hostname: '', relay_context: 'auto' });
+  const certificateChecks = clone(state.settings.certificate_checks?.[domain] || { check_public: true, check_origin: false, origin_ip: '' });
   state.editor = {
     index,
     originalDomain: domain,
     selectors: clone(state.settings.dkim_selectors[domain] || []),
     endpoints: clone(state.settings.tls_endpoints[domain] || []),
+    certificateChecks,
     smtpProfile,
     bimiExceptionsOriginal: exceptions,
     bimiExceptionDirty: { self_asserted: false, no_logo: false },
     controlExceptionsOriginal: { mta_sts: controlExceptions.mta_sts || null, tls_certificates: controlExceptions.tls_certificates || null },
-    controlExceptionDirty: { mta_sts: false, tls_certificates: false },
+    controlExceptionDirty: { mta_sts: false },
     editingSelector: null,
     editingEndpoint: null
   };
@@ -550,6 +577,9 @@ function openDomainEditor(index = null) {
   $('#smtp-provider').value = smtpProfile.provider || 'auto';
   $('#smtp-expected-host').value = smtpProfile.expected_hostname || '';
   $('#smtp-relay-context').value = smtpProfile.relay_context || 'auto';
+  $('#check-public-certificate').checked = certificateChecks.check_public !== false;
+  $('#check-origin-certificate').checked = certificateChecks.check_origin === true;
+  $('#origin-ip').value = certificateChecks.origin_ip || '';
   $('#selector-input').value = '';
   $('#selector-add').textContent = '＋';
   $('#endpoint-host').value = '';
@@ -558,13 +588,17 @@ function openDomainEditor(index = null) {
   setBimiExceptionFields('self_asserted', '#bimi-ignore-mode', '#bimi-ignore-months');
   setBimiExceptionFields('no_logo', '#bimi-no-logo-ignore-mode', '#bimi-no-logo-ignore-months');
   setControlExceptionFields('mta_sts', '#mta-sts-ignore-mode', '#mta-sts-ignore-months');
-  setControlExceptionFields('tls_certificates', '#tls-certificates-ignore-mode', '#tls-certificates-ignore-months');
   $('#domain-message').textContent = '';
   renderEditorLists();
   updateBimiIgnoreVisibility();
   updateControlIgnoreVisibility();
   updateMailHostingFields();
+  updateOriginCertificateVisibility();
   $('#domain-dialog').showModal();
+}
+
+function updateOriginCertificateVisibility() {
+  $('#origin-ip-field').hidden = !$('#check-origin-certificate').checked;
 }
 
 function updateMailHostingFields() {
@@ -611,7 +645,7 @@ function setControlExceptionFields(kind, modeSelector, monthsSelector) {
 }
 
 function updateControlIgnoreVisibility() {
-  for (const item of [{ kind: 'mta_sts', mode: '#mta-sts-ignore-mode', field: '#mta-sts-ignore-months-field', note: '#mta-sts-ignore-expiration' }, { kind: 'tls_certificates', mode: '#tls-certificates-ignore-mode', field: '#tls-certificates-ignore-months-field', note: '#tls-certificates-ignore-expiration' }]) {
+  for (const item of [{ kind: 'mta_sts', mode: '#mta-sts-ignore-mode', field: '#mta-sts-ignore-months-field', note: '#mta-sts-ignore-expiration' }]) {
     const temporary = $(item.mode).value === 'temporary'; $(item.field).hidden = !temporary;
     const original = state.editor?.controlExceptionsOriginal?.[item.kind]; const note = $(item.note);
     if (!temporary) note.textContent = '';
@@ -672,14 +706,20 @@ function saveDomain(event) {
   if (!valid) return showDomainError('Enter a valid domain name.');
   const duplicate = state.settings.monitored_domains.findIndex((value, index) => value === domain && index !== state.editor.index);
   if (duplicate >= 0) return showDomainError('That domain is already monitored.');
+  const checkPublic = $('#check-public-certificate').checked;
+  const checkOrigin = $('#check-origin-certificate').checked;
+  const originIp = $('#origin-ip').value.trim();
+  if (!checkPublic && !checkOrigin) return showDomainError('Enable at least one certificate check.');
+  const looksLikeIpv4 = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(originIp) && originIp.split('.').every(part => Number(part) <= 255);
+  const looksLikeIpv6 = /^[0-9a-f:]+$/i.test(originIp) && originIp.includes(':');
+  if (checkOrigin && !looksLikeIpv4 && !looksLikeIpv6) return showDomainError('Enter a valid origin IPv4 or IPv6 address.');
   const expectedHostname = $('#smtp-expected-host').value.trim().toLowerCase().replace(/\.$/, '');
   if (expectedHostname && !/^(?=.{1,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(expectedHostname)) return showDomainError('Enter a valid expected SMTP hostname or leave it blank.');
-  let selfAssertedException; let noLogoException; let mtaStsException; let tlsCertificatesException;
+  let selfAssertedException; let noLogoException; let mtaStsException;
   try {
     selfAssertedException = bimiExceptionFromFields('self_asserted', '#bimi-ignore-mode', '#bimi-ignore-months');
     noLogoException = bimiExceptionFromFields('no_logo', '#bimi-no-logo-ignore-mode', '#bimi-no-logo-ignore-months');
     mtaStsException = controlExceptionFromFields('mta_sts', '#mta-sts-ignore-mode', '#mta-sts-ignore-months');
-    tlsCertificatesException = controlExceptionFromFields('tls_certificates', '#tls-certificates-ignore-mode', '#tls-certificates-ignore-months');
   }
   catch (error) { return showDomainError(error.message); }
   const oldDomain = state.editor.originalDomain;
@@ -688,19 +728,23 @@ function saveDomain(event) {
   if (oldDomain && oldDomain !== domain) {
     delete state.settings.dkim_selectors[oldDomain];
     delete state.settings.tls_endpoints[oldDomain];
+    if (state.settings.certificate_checks) delete state.settings.certificate_checks[oldDomain];
     if (state.settings.smtp_profiles) delete state.settings.smtp_profiles[oldDomain];
     if (state.settings.bimi_exceptions) delete state.settings.bimi_exceptions[oldDomain];
     if (state.settings.control_exceptions) delete state.settings.control_exceptions[oldDomain];
   }
   state.settings.dkim_selectors[domain] = clone(state.editor.selectors);
   state.settings.tls_endpoints[domain] = clone(state.editor.endpoints);
+  state.settings.certificate_checks ||= {};
+  state.settings.certificate_checks[domain] = { check_public: checkPublic, check_origin: checkOrigin, origin_ip: checkOrigin ? originIp : '' };
   state.settings.smtp_profiles ||= {};
   state.settings.smtp_profiles[domain] = { hosting_type: $('#smtp-hosting-type').value, provider: $('#smtp-provider').disabled ? 'auto' : $('#smtp-provider').value, expected_hostname: expectedHostname, relay_context: $('#smtp-relay-context').value };
   state.settings.bimi_exceptions ||= {};
   if (selfAssertedException || noLogoException) state.settings.bimi_exceptions[domain] = { ...(selfAssertedException ? { self_asserted: selfAssertedException } : {}), ...(noLogoException ? { no_logo: noLogoException } : {}) };
   else delete state.settings.bimi_exceptions[domain];
   state.settings.control_exceptions ||= {};
-  if (mtaStsException || tlsCertificatesException) state.settings.control_exceptions[domain] = { ...(mtaStsException ? { mta_sts: mtaStsException } : {}), ...(tlsCertificatesException ? { tls_certificates: tlsCertificatesException } : {}) };
+  const legacyTlsCertificateException = state.editor.controlExceptionsOriginal.tls_certificates;
+  if (mtaStsException || legacyTlsCertificateException) state.settings.control_exceptions[domain] = { ...(mtaStsException ? { mta_sts: mtaStsException } : {}), ...(legacyTlsCertificateException ? { tls_certificates: legacyTlsCertificateException } : {}) };
   else delete state.settings.control_exceptions[domain];
   $('#domain-dialog').close();
   renderSettingsDomains();
@@ -721,7 +765,14 @@ async function saveSettings(event) {
       ...state.settings,
       report_days: Number($('#report-days').value),
       refresh_minutes: Number($('#refresh-minutes').value),
+      certificate_check_minutes: Number($('#certificate-check-minutes').value),
       request_timeout_ms: Number($('#request-timeout').value),
+      notifications: {
+        discord_enabled: $('#discord-enabled').checked,
+        ssl_enabled: $('#ssl-notifications-enabled').checked,
+        needs_attention_enabled: $('#attention-notifications-enabled').checked,
+        ssl_warning_threshold: Number($('#ssl-warning-threshold').value)
+      },
       smtp_probe_hostname: $('#smtp-probe-hostname').value.trim(),
       report_source: $('#report-source').value,
       opensearch_url: $('#opensearch-url').value.trim(),
@@ -825,7 +876,7 @@ async function showRoute(pathname, push = false) {
   state.route = route;
   $('#domain-menu-list').hidden = true;
   $('#domain-menu-button').setAttribute('aria-expanded', 'false');
-  document.title = `${{ '/': 'Dashboard', '/domains': 'Domains', '/status': 'System Status', '/settings': 'Settings', '/help': 'Help' }[route]} · MailPosture`;
+  document.title = `${{ '/': 'Dashboard', '/domains': 'Domains', '/status': 'System Status', '/settings': 'Settings', '/help': 'Help' }[route]} · DomainPosture`;
   if (push) history.pushState({}, '', route);
   const viewByRoute = { '/': '#dashboard-view', '/domains': '#domains-view', '/status': '#system-status-view', '/settings': '#settings-view', '/help': '#help-view' };
   Object.values(viewByRoute).forEach(selector => { $(selector).hidden = selector !== viewByRoute[route]; });
@@ -880,6 +931,7 @@ $('#domain-menu-button').onclick = event => {
 $('#report-source').onchange = updateSettingsVisibility;
 $('#mailbox-enabled').onchange = updateSettingsVisibility;
 $('#snapshots-enabled').onchange = updateSettingsVisibility;
+$('#check-origin-certificate').onchange = updateOriginCertificateVisibility;
 $('#archive-folder').oninput = updateSettingsVisibility;
 $('#bimi-ignore-mode').onchange = () => { state.editor.bimiExceptionDirty.self_asserted = true; updateBimiIgnoreVisibility(); };
 $('#bimi-ignore-months').oninput = () => { state.editor.bimiExceptionDirty.self_asserted = true; updateBimiIgnoreVisibility(); };
@@ -887,8 +939,6 @@ $('#bimi-no-logo-ignore-mode').onchange = () => { state.editor.bimiExceptionDirt
 $('#bimi-no-logo-ignore-months').oninput = () => { state.editor.bimiExceptionDirty.no_logo = true; updateBimiIgnoreVisibility(); };
 $('#mta-sts-ignore-mode').onchange = () => { state.editor.controlExceptionDirty.mta_sts = true; updateControlIgnoreVisibility(); };
 $('#mta-sts-ignore-months').oninput = () => { state.editor.controlExceptionDirty.mta_sts = true; updateControlIgnoreVisibility(); };
-$('#tls-certificates-ignore-mode').onchange = () => { state.editor.controlExceptionDirty.tls_certificates = true; updateControlIgnoreVisibility(); };
-$('#tls-certificates-ignore-months').oninput = () => { state.editor.controlExceptionDirty.tls_certificates = true; updateControlIgnoreVisibility(); };
 $('#smtp-hosting-type').onchange = updateMailHostingFields;
 $('#log-service').onchange = renderSystemLogs;
 $('#service-log-service').onchange = loadServiceLogs;
@@ -909,9 +959,9 @@ document.querySelectorAll('[data-settings-tab]').forEach(tab => {
     if (next !== null) { event.preventDefault(); selectSettingsTab(tabs[next].dataset.settingsTab, true); }
   };
 });
-themeQuery.addEventListener?.('change', () => { if ((localStorage.getItem('mailposture-theme') || 'system') === 'system') setTheme('system', false); });
+themeQuery.addEventListener?.('change', () => { if ((localStorage.getItem('domainposture-theme') || localStorage.getItem('mailposture-theme') || 'system') === 'system') setTheme('system', false); });
 
-document.onclick = event => {
+document.onclick = async event => {
   if (!event.target.closest('.domain-menu')) {
     $('#domain-menu-list').hidden = true;
     $('#domain-menu-button').setAttribute('aria-expanded', 'false');
@@ -946,6 +996,26 @@ document.onclick = event => {
   if (domain) { state.selected = Number(domain.dataset.domain); renderDomain(); return; }
   const dashboardCheck = event.target.closest('[data-dashboard-check]');
   if (dashboardCheck) { state.selected = Number(dashboardCheck.dataset.domainIndex); detail(dashboardCheck.dataset.dashboardCheck); return; }
+  const checkNow = event.target.closest('[data-check-now]');
+  if (checkNow) {
+    const original = checkNow.textContent;
+    checkNow.disabled = true;
+    checkNow.textContent = 'Checking…';
+    try {
+      const response = await fetch(`/api/domains/${encodeURIComponent(checkNow.dataset.checkNow)}/check`, { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Unable to check this domain.');
+      state.data = data;
+      renderStatus();
+      await loadSystemStatus();
+    } catch (error) {
+      window.alert(error.message);
+    } finally {
+      checkNow.disabled = false;
+      checkNow.textContent = original;
+    }
+    return;
+  }
   const check = event.target.closest('[data-check]');
   if (check) { detail(check.dataset.check); return; }
   if (event.target.closest('[data-add-domain]')) { openDomainEditor(); return; }
@@ -958,6 +1028,7 @@ document.onclick = event => {
     delete state.settings.dkim_selectors[removed];
     delete state.settings.tls_endpoints[removed];
     if (state.settings.smtp_profiles) delete state.settings.smtp_profiles[removed];
+    if (state.settings.certificate_checks) delete state.settings.certificate_checks[removed];
     if (state.settings.bimi_exceptions) delete state.settings.bimi_exceptions[removed];
     if (state.settings.control_exceptions) delete state.settings.control_exceptions[removed];
     renderSettingsDomains();
@@ -1006,7 +1077,7 @@ $('#selector-input').onkeydown = event => { if (event.key === 'Enter') { event.p
 $('#endpoint-host').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); addEndpoint(); } };
 $('#endpoint-port').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); addEndpoint(); } };
 
-setTheme(localStorage.getItem('mailposture-theme') || 'system', false);
+setTheme(localStorage.getItem('domainposture-theme') || localStorage.getItem('mailposture-theme') || 'system', false);
 setDomainSort(state.domainSort, false);
 showRoute(location.pathname);
 loadStatus();

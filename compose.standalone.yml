@@ -2,16 +2,17 @@ name: mailposture
 
 services:
   mailposture:
-    image: ${MAILPOSTURE_IMAGE:?Enter the GHCR image, for example ghcr.io/owner/mailposture:latest}
+    image: ${DOMAINPOSTURE_IMAGE:-${MAILPOSTURE_IMAGE:?Enter DOMAINPOSTURE_IMAGE, for example ghcr.io/owner/domainposture:latest}}
     pull_policy: always
-    container_name: mailposture
+    container_name: domainposture
     restart: unless-stopped
     depends_on:
       parsedmarc-opensearch:
         condition: service_healthy
     environment:
       TZ: ${TZ:-UTC}
-      MAILPOSTURE_DEPLOYMENT_MODE: standalone
+      DOMAINPOSTURE_DEPLOYMENT_MODE: standalone
+      DOMAINPOSTURE_DISCORD_WEBHOOK: ${DOMAINPOSTURE_DISCORD_WEBHOOK:-${MAILPOSTURE_DISCORD_WEBHOOK:-}}
       OPENSEARCH_URL: http://parsedmarc-opensearch:9200
       OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-dmarc_aggregate*}
       OPENSEARCH_FAILURE_INDEX: ${OPENSEARCH_FAILURE_INDEX:-dmarc_failure*,dmarc_forensic*}
@@ -22,7 +23,7 @@ services:
       SERVICE_LOGS_ENABLED: "true"
     volumes:
       - type: bind
-        source: ${MAILPOSTURE_SETTINGS_PATH:-${ROOT:?Set ROOT to the parent directory for persistent application data}/mailposture/settings}
+        source: ${DOMAINPOSTURE_SETTINGS_PATH:-${MAILPOSTURE_SETTINGS_PATH:-${ROOT:?Set ROOT to the parent directory for persistent application data}/mailposture/settings}}
         target: /data
       - type: volume
         source: parsedmarc_status
@@ -35,8 +36,10 @@ services:
     expose:
       - "8080"
     networks:
-      - backend
-      - proxy
+      backend:
+        aliases: [domainposture, mailposture]
+      proxy:
+        aliases: [domainposture, mailposture]
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -140,7 +143,7 @@ services:
         while true; do
           while ! grep -q '^\[mailbox\]' /etc/parsedmarc/config.ini 2>/dev/null; do
             write_status waiting_config null
-            log_message "Waiting for report mailbox settings to be enabled in MailPosture"
+            log_message "Waiting for report mailbox settings to be enabled in DomainPosture"
             sleep 10
           done
           checksum="$$(cksum < /etc/parsedmarc/config.ini)"
@@ -154,7 +157,7 @@ services:
             updated="$$(cksum < /etc/parsedmarc/config.ini 2>/dev/null || true)"
             if [ "$$updated" != "$$checksum" ]; then
               write_status reloading null
-              log_message "MailPosture settings changed; reloading parsedmarc"
+              log_message "DomainPosture settings changed; reloading parsedmarc"
               kill -TERM "$$child" 2>/dev/null || true
               wait "$$child" 2>/dev/null || true
               child=""
@@ -175,7 +178,7 @@ services:
       PARSEDMARC_OPENSEARCH_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD}
     volumes:
       - type: bind
-        source: ${MAILPOSTURE_SETTINGS_PATH:-${ROOT}/mailposture/settings}/parsedmarc
+        source: ${DOMAINPOSTURE_SETTINGS_PATH:-${MAILPOSTURE_SETTINGS_PATH:-${ROOT}/mailposture/settings}}/parsedmarc
         target: /etc/parsedmarc
         read_only: true
       - type: volume

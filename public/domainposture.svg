@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
-  <title id="title">MailPosture</title>
-  <desc id="desc">An envelope protected by a check mark</desc>
+  <title id="title">DomainPosture</title>
+  <desc id="desc">A globe protected by a check mark</desc>
   <defs>
     <linearGradient id="background" x1="9" y1="6" x2="54" y2="59" gradientUnits="userSpaceOnUse">
       <stop stop-color="#58B7FF"/>
@@ -8,8 +8,8 @@
     </linearGradient>
   </defs>
   <rect x="2" y="2" width="60" height="60" rx="17" fill="url(#background)"/>
-  <path d="M14 20.5h36v25H14z" fill="none" stroke="#061C2E" stroke-width="4" stroke-linejoin="round"/>
-  <path d="m15.5 22 16.5 13L48.5 22" fill="none" stroke="#061C2E" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="30" cy="30" r="17" fill="none" stroke="#061C2E" stroke-width="3.5"/>
+  <path d="M13 30h34M30 13c6 6 8 12 8 17s-2 11-8 17M30 13c-6 6-8 12-8 17s2 11 8 17" fill="none" stroke="#061C2E" stroke-width="3" stroke-linecap="round"/>
   <circle cx="47" cy="46" r="12" fill="#F7FBFF" stroke="#061C2E" stroke-width="3"/>
   <path d="m41.5 46 3.6 3.7 7.3-8" fill="none" stroke="#0C71C3" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

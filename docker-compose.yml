@@ -2,13 +2,14 @@ name: mailposture
 
 services:
   mailposture:
-    image: ${MAILPOSTURE_IMAGE:?Enter the GHCR image, for example ghcr.io/owner/mailposture:latest}
+    image: ${DOMAINPOSTURE_IMAGE:-${MAILPOSTURE_IMAGE:?Enter DOMAINPOSTURE_IMAGE, for example ghcr.io/owner/domainposture:latest}}
     pull_policy: always
-    container_name: mailposture
+    container_name: domainposture
     restart: unless-stopped
     environment:
       TZ: ${TZ:-UTC}
-      MAILPOSTURE_DEPLOYMENT_MODE: external
+      DOMAINPOSTURE_DEPLOYMENT_MODE: external
+      DOMAINPOSTURE_DISCORD_WEBHOOK: ${DOMAINPOSTURE_DISCORD_WEBHOOK:-${MAILPOSTURE_DISCORD_WEBHOOK:-}}
       OPENSEARCH_URL: ${OPENSEARCH_URL:-http://parsedmarc-opensearch:9200}
       OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-dmarc_aggregate*}
       OPENSEARCH_FAILURE_INDEX: ${OPENSEARCH_FAILURE_INDEX:-dmarc_failure*,dmarc_forensic*}
@@ -22,8 +23,10 @@ services:
     expose:
       - "8080"
     networks:
-      - monitoring
-      - proxy
+      monitoring:
+        aliases: [domainposture, mailposture]
+      proxy:
+        aliases: [domainposture, mailposture]
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -38,7 +41,7 @@ services:
 
 volumes:
   mailposture_data:
-    name: ${MAILPOSTURE_DATA_VOLUME:-mailposture_data}
+    name: ${DOMAINPOSTURE_DATA_VOLUME:-${MAILPOSTURE_DATA_VOLUME:-mailposture_data}}
 
 networks:
   monitoring:

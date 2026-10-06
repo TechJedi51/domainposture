@@ -2,23 +2,26 @@
 
 const http = require('http');
 const https = require('https');
-const tls = require('tls');
 const dns = require('dns').promises;
+const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { version: PACKAGE_VERSION } = require('./package.json');
 const { smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validHostname: validSmtpHostname, timingTest: smtpTimingTest, resolveSmtpProfile, smtpProfile } = require('./smtp');
 const { spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp } = require('./dns-security');
+const sslMonitor = require('./ssl-monitor');
 
 const PORT = Number(process.env.PORT || 8080);
 const APP_VERSION = process.env.APP_VERSION || PACKAGE_VERSION;
-const SETTINGS_PATH = process.env.SETTINGS_PATH || '/data/settings.json';
-const SECRETS_PATH = process.env.SECRETS_PATH || '/data/secrets.json';
+const SETTINGS_PATH = process.env.DOMAINPOSTURE_SETTINGS_FILE || process.env.SETTINGS_PATH || '/data/settings.json';
+const SECRETS_PATH = process.env.DOMAINPOSTURE_SECRETS_FILE || process.env.SECRETS_PATH || '/data/secrets.json';
+const STATE_PATH = process.env.DOMAINPOSTURE_STATE_PATH || '/data/domainposture-state.json';
 const PARSEDMARC_CONFIG_PATH = process.env.PARSEDMARC_CONFIG_PATH || '/data/parsedmarc/config.ini';
 const PARSEDMARC_STATUS_PATH = process.env.PARSEDMARC_STATUS_PATH || '/run/parsedmarc/status.json';
 const SERVICE_LOGS_ENABLED = String(process.env.SERVICE_LOGS_ENABLED || 'false').toLowerCase() === 'true';
 const SERVICE_LOG_PATHS = {
+  domainposture: process.env.DOMAINPOSTURE_LOG_PATH || process.env.MAILPOSTURE_LOG_PATH || '/data/logs/domainposture.log',
   mailposture: process.env.MAILPOSTURE_LOG_PATH || '/data/logs/mailposture.log',
   opensearch: process.env.OPENSEARCH_LOG_PATH || '/logs/opensearch',
   parsedmarc: process.env.PARSEDMARC_LOG_PATH || '/run/parsedmarc/parsedmarc.log'
@@ -30,6 +33,7 @@ let activeRefresh = null;
 let runtimeSettings = null;
 let refreshTimer = null;
 let requestTimeoutMs = 8000;
+let operationalState = null;
 const diagnosticEvents = [];
 const diagnosticStates = new Map();
 const bimiLogos = new Map();
@@ -40,11 +44,11 @@ function redactLogText(value) {
     .replace(/((?:password|authorization|token|secret)["']?\s*[=:]\s*["']?)[^\s,;"']+/gi, '$1[REDACTED]');
 }
 
-function appendMailpostureLog(level, service, message, detail) {
+function appendDomainpostureLog(level, service, message, detail) {
   if (!SERVICE_LOGS_ENABLED) return;
   const line = `${new Date().toISOString()} [${level.toUpperCase()}] [${service}] ${message}${detail ? ` — ${detail}` : ''}\n`;
-  fs.promises.mkdir(path.dirname(SERVICE_LOG_PATHS.mailposture), { recursive: true })
-    .then(() => fs.promises.appendFile(SERVICE_LOG_PATHS.mailposture, redactLogText(line), { mode: 0o600 }))
+  fs.promises.mkdir(path.dirname(SERVICE_LOG_PATHS.domainposture), { recursive: true })
+    .then(() => fs.promises.appendFile(SERVICE_LOG_PATHS.domainposture, redactLogText(line), { mode: 0o600 }))
     .catch(() => {});
 }
 
@@ -58,13 +62,13 @@ function addDiagnosticEvent(service, level, message, detail = '') {
     detail
   });
   if (diagnosticEvents.length > 300) diagnosticEvents.splice(0, diagnosticEvents.length - 300);
-  appendMailpostureLog(level, service, message, detail);
+  appendDomainpostureLog(level, service, message, detail);
 }
 
 function diagnosticService(check) {
   if (check.id === 'opensearch' || check.id === 'report_indices') return 'opensearch';
   if (check.id.startsWith('parsedmarc')) return 'parsedmarc';
-  return 'mailposture';
+  return 'domainposture';
 }
 
 function recordSystemChecks(checks) {
@@ -248,6 +252,33 @@ function normalizeSmtpProfiles(input = {}, monitoredDomains = []) {
   return output;
 }
 
+function normalizeCertificateChecks(input = {}, monitoredDomains = []) {
+  const output = {};
+  for (const domain of monitoredDomains) {
+    const configured = input?.[domain] || {};
+    const checkPublic = configured.check_public === undefined
+      ? configured.check_public_cert === undefined ? true : configured.check_public_cert !== false
+      : configured.check_public !== false;
+    const checkOrigin = configured.check_origin === true || configured.check_origin_cert === true;
+    const originIp = textValue(configured.origin_ip, '', 64);
+    if (!checkPublic && !checkOrigin) throw new Error(`Enable at least one certificate check for ${domain}`);
+    if (checkOrigin && !net.isIP(originIp)) throw new Error(`Enter a valid origin IPv4 or IPv6 address for ${domain}`);
+    output[domain] = { check_public: checkPublic, check_origin: checkOrigin, origin_ip: checkOrigin ? originIp : '' };
+  }
+  return output;
+}
+
+function normalizeNotifications(input = {}) {
+  const warningThreshold = boundedNumber(input.ssl_warning_threshold, 30, 7, 365, 'SSL warning threshold');
+  return {
+    discord_enabled: input.discord_enabled !== false,
+    ssl_enabled: input.ssl_enabled !== false,
+    needs_attention_enabled: input.needs_attention_enabled !== false,
+    ssl_warning_threshold: warningThreshold,
+    ssl_milestones: [...new Set([warningThreshold, 14, 7])].sort((a, b) => b - a)
+  };
+}
+
 function activeBimiException(exception, now = Date.now()) {
   if (exception?.mode === 'permanent') return { active: true, mode: 'permanent', label: 'permanently' };
   if (exception?.mode === 'until') {
@@ -287,7 +318,8 @@ function normalizeSettings(input = {}) {
       if (!Number.isInteger(endpoint.port) || endpoint.port < 1 || endpoint.port > 65535) throw new Error(`Invalid TLS endpoint port for ${endpoint.host}`);
     }
   }
-  const environmentMode = ['standalone', 'external'].includes(process.env.MAILPOSTURE_DEPLOYMENT_MODE) ? process.env.MAILPOSTURE_DEPLOYMENT_MODE : 'external';
+  const configuredMode = process.env.DOMAINPOSTURE_DEPLOYMENT_MODE || process.env.MAILPOSTURE_DEPLOYMENT_MODE;
+  const environmentMode = ['standalone', 'external'].includes(configuredMode) ? configuredMode : 'external';
   const reportSource = ['standalone', 'external', 'disabled'].includes(input.report_source) ? input.report_source : (input.opensearch_enabled === false ? 'disabled' : environmentMode);
   const opensearchUrl = textValue(input.opensearch_url, process.env.OPENSEARCH_URL || 'http://parsedmarc-opensearch:9200');
   if (!validHttpUrl(opensearchUrl)) throw new Error('OpenSearch URL must be an HTTP or HTTPS URL without embedded credentials');
@@ -308,10 +340,13 @@ function normalizeSettings(input = {}) {
   const smtpProbeHostname = textValue(input.smtp_probe_hostname, process.env.SMTP_PROBE_HOSTNAME || '', 253).toLowerCase().replace(/\.$/, '');
   if (smtpProbeHostname && !validDomain(smtpProbeHostname)) throw new Error('SMTP probe hostname must be a fully qualified domain name');
   return {
-    schema_version: 7,
+    schema_version: 8,
     monitored_domains: domains,
     dkim_selectors: selectors,
     tls_endpoints: endpoints,
+    certificate_checks: normalizeCertificateChecks(input.certificate_checks, domains),
+    certificate_check_minutes: boundedNumber(input.certificate_check_minutes, 360, 5, 10080, 'Certificate check interval'),
+    notifications: normalizeNotifications(input.notifications),
     smtp_profiles: normalizeSmtpProfiles(input.smtp_profiles, domains),
     smtp_probe_hostname: smtpProbeHostname,
     bimi_exceptions: normalizeBimiExceptions(input.bimi_exceptions, domains),
@@ -397,9 +432,47 @@ function readSecrets() {
   try { return JSON.parse(fs.readFileSync(SECRETS_PATH, 'utf8')); } catch (_) { return {}; }
 }
 
+function defaultOperationalState() {
+  return { schema_version: 1, certificates: {}, notifications: { certificates: {}, domains: {} } };
+}
+
+function getOperationalState() {
+  if (operationalState) return operationalState;
+  try {
+    const saved = JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
+    operationalState = {
+      ...defaultOperationalState(),
+      ...saved,
+      certificates: saved.certificates && typeof saved.certificates === 'object' ? saved.certificates : {},
+      notifications: {
+        certificates: saved.notifications?.certificates && typeof saved.notifications.certificates === 'object' ? saved.notifications.certificates : {},
+        domains: saved.notifications?.domains && typeof saved.notifications.domains === 'object' ? saved.notifications.domains : {}
+      }
+    };
+  } catch (_) { operationalState = defaultOperationalState(); }
+  return operationalState;
+}
+
+async function saveOperationalState() {
+  await atomicWrite(STATE_PATH, `${JSON.stringify(getOperationalState(), null, 2)}\n`);
+}
+
+function discordWebhookUrl() {
+  const value = String(process.env.DOMAINPOSTURE_DISCORD_WEBHOOK || process.env.MAILPOSTURE_DISCORD_WEBHOOK || '').trim();
+  try {
+    const url = new URL(value);
+    const allowedHosts = new Set(['discord.com', 'discordapp.com', 'canary.discord.com', 'ptb.discord.com']);
+    return url.protocol === 'https:' && allowedHosts.has(url.hostname) && url.pathname.startsWith('/api/webhooks/') ? url : null;
+  } catch (_) { return null; }
+}
+
 function publicSettings(settings = getSettings()) {
   const secrets = readSecrets();
-  return { ...settings, mailbox: { ...settings.mailbox, password: '', password_set: Boolean(secrets.imap_password) } };
+  return {
+    ...settings,
+    mailbox: { ...settings.mailbox, password: '', password_set: Boolean(secrets.imap_password) },
+    notifications: { ...settings.notifications, discord_webhook_configured: Boolean(discordWebhookUrl()) }
+  };
 }
 
 async function atomicWrite(filename, content, mode = 0o600) {
@@ -410,7 +483,7 @@ async function atomicWrite(filename, content, mode = 0o600) {
 }
 
 function parsedmarcIni(settings, secrets = {}) {
-  if (!settings.mailbox.enabled) return '# Mailbox collection is disabled in MailPosture.\n';
+  if (!settings.mailbox.enabled) return '# Mailbox collection is disabled in DomainPosture.\n';
   const value = input => String(input ?? '').replace(/%/g, '%%');
   const bool = input => input ? 'True' : 'False';
   const pm = settings.parsedmarc;
@@ -480,7 +553,7 @@ async function saveSettings(value) {
     try { await configureSnapshots(settingsConfig(settings).opensearch, settings.snapshots); }
     catch (error) { snapshot_notice = `Settings were saved, but the snapshot policy could not be updated: ${error.message}`; }
   }
-  addDiagnosticEvent('mailposture', 'info', 'Settings saved', settings.report_source === 'standalone' ? 'The active ParseDMARC configuration was regenerated.' : 'Runtime settings were updated.');
+  addDiagnosticEvent('domainposture', 'info', 'Settings saved', settings.report_source === 'standalone' ? 'The active ParseDMARC configuration was regenerated.' : 'Runtime settings were updated.');
   return {
     ...publicSettings(settings),
     snapshot_notice,
@@ -493,6 +566,8 @@ async function saveSettings(value) {
 function settingsConfig(settings = getSettings()) {
   return {
     smtp_probe_hostname: settings.smtp_probe_hostname,
+    certificate_check_minutes: settings.certificate_check_minutes,
+    notifications: settings.notifications,
     opensearch: {
       enabled: settings.report_source !== 'disabled',
       url: settings.opensearch_url,
@@ -508,6 +583,7 @@ function settingsConfig(settings = getSettings()) {
       domain,
       dkim_selectors: settings.dkim_selectors[domain] || [],
       tls_endpoints: settings.tls_endpoints[domain] || [],
+      certificate_checks: settings.certificate_checks[domain],
       smtp_profile: settings.smtp_profiles[domain] || { hosting_type: 'auto', provider: 'auto', expected_hostname: '', relay_context: 'auto' },
       bimi_exception: settings.bimi_exceptions[domain] || null,
       control_exception: settings.control_exceptions[domain] || null,
@@ -525,12 +601,12 @@ function overallStatus(checks) {
 }
 
 function parsedmarcConfigurationStatus(settings, content, metadata = {}) {
-  if (settings.report_source !== 'standalone') return result('parsedmarc_config', 'ParseDMARC configuration', 'warning', 'Managed externally', 'MailPosture cannot verify the active configuration used by an external ParseDMARC service.', 'Confirm the external service mounts the generated configuration and reloads it after changes.');
+  if (settings.report_source !== 'standalone') return result('parsedmarc_config', 'ParseDMARC configuration', 'warning', 'Managed externally', 'DomainPosture cannot verify the active configuration used by an external ParseDMARC service.', 'Confirm the external service mounts the generated configuration and reloads it after changes.');
   if (!settings.mailbox.enabled) return result('parsedmarc_config', 'ParseDMARC configuration', 'warning', 'Collection disabled', 'The report mailbox is not enabled, so ParseDMARC is not expected to collect reports.', 'Enable report collection in Settings when you are ready to process the mailbox.');
   const required = ['general', 'mailbox', 'imap', 'opensearch'];
   const sections = new Set(String(content || '').split(/\r?\n/).map(line => line.match(/^\[([^\]]+)\]$/)?.[1]).filter(Boolean));
   const missing = required.filter(section => !sections.has(section));
-  if (missing.length) return result('parsedmarc_config', 'ParseDMARC configuration', 'critical', 'Configuration incomplete', `The active configuration is missing: ${missing.join(', ')}.`, 'Save the ParseDMARC settings again and verify that MailPosture can write its data directory.', { path: PARSEDMARC_CONFIG_PATH, missing_sections: missing });
+  if (missing.length) return result('parsedmarc_config', 'ParseDMARC configuration', 'critical', 'Configuration incomplete', `The active configuration is missing: ${missing.join(', ')}.`, 'Save the ParseDMARC settings again and verify that DomainPosture can write its data directory.', { path: PARSEDMARC_CONFIG_PATH, missing_sections: missing });
   return result('parsedmarc_config', 'ParseDMARC configuration', 'healthy', 'Active configuration ready', 'The generated configuration contains the mailbox, IMAP, and OpenSearch sections required by ParseDMARC.', 'No action required.', { path: PARSEDMARC_CONFIG_PATH, updated_at: metadata.updated_at || null, size_bytes: metadata.size_bytes || Buffer.byteLength(content) });
 }
 
@@ -554,7 +630,7 @@ function unassignedShardSummary(shards, settings) {
   for (const shard of unassigned) {
     const index = String(shard.index || 'unknown');
     const category = reportPatterns.some(pattern => matchesIndexPattern(index, pattern))
-      ? 'MailPosture report indexes'
+      ? 'DomainPosture report indexes'
       : index.startsWith('security-auditlog-')
         ? 'OpenSearch security audit logs'
         : index.startsWith('.')
@@ -579,7 +655,7 @@ async function systemStatus() {
   let settings;
   try { settings = getSettings(); }
   catch (error) {
-    const checks = [result('mailposture', 'MailPosture', 'critical', 'Settings unavailable', error.message, 'Verify the persistent data mount and settings file.')];
+    const checks = [result('mailposture', 'DomainPosture', 'critical', 'Settings unavailable', error.message, 'Verify the persistent data mount and settings file.')];
     recordSystemChecks(checks);
     return { version: APP_VERSION, checked_at: checkedAt, status: 'critical', checks };
   }
@@ -588,16 +664,24 @@ async function systemStatus() {
   const lastRefresh = snapshot.generated_at ? new Date(snapshot.generated_at).getTime() : 0;
   const staleAfter = Math.max(2, settings.refresh_minutes * 2) * 60000;
   const appStatus = snapshot.error ? 'critical' : (!lastRefresh || Date.now() - lastRefresh > staleAfter ? 'warning' : 'healthy');
-  checks.push(result('mailposture', 'MailPosture', appStatus, snapshot.error ? 'Checks failed' : appStatus === 'warning' ? 'Checks are stale' : 'Application checks running', snapshot.error || (lastRefresh ? `The most recent domain check completed ${Math.max(0, Math.floor((Date.now() - lastRefresh) / 60000))} minutes ago.` : 'The first domain check has not completed yet.'), appStatus === 'healthy' ? 'No action required.' : 'Run checks again and review the application logs if the condition remains.', { version: APP_VERSION, uptime_seconds: Math.floor((Date.now() - startedAt) / 1000), last_domain_check: snapshot.generated_at }));
+  checks.push(result('mailposture', 'DomainPosture', appStatus, snapshot.error ? 'Checks failed' : appStatus === 'warning' ? 'Checks are stale' : 'Application checks running', snapshot.error || (lastRefresh ? `The most recent domain check completed ${Math.max(0, Math.floor((Date.now() - lastRefresh) / 60000))} minutes ago.` : 'The first domain check has not completed yet.'), appStatus === 'healthy' ? 'No action required.' : 'Run checks again and review the application logs if the condition remains.', { version: APP_VERSION, uptime_seconds: Math.floor((Date.now() - startedAt) / 1000), last_domain_check: snapshot.generated_at }));
 
   try {
     await Promise.all([
       fs.promises.access(path.dirname(SETTINGS_PATH), fs.constants.R_OK | fs.constants.W_OK),
-      fs.promises.access(path.dirname(PARSEDMARC_CONFIG_PATH), fs.constants.R_OK | fs.constants.W_OK)
+      fs.promises.access(path.dirname(PARSEDMARC_CONFIG_PATH), fs.constants.R_OK | fs.constants.W_OK),
+      fs.promises.access(path.dirname(STATE_PATH), fs.constants.R_OK | fs.constants.W_OK)
     ]);
-    checks.push(result('storage', 'Settings storage', 'healthy', 'Persistent storage writable', 'MailPosture can read and write its settings and generated ParseDMARC configuration directories.', 'No action required.'));
+    checks.push(result('storage', 'Settings storage', 'healthy', 'Persistent storage writable', 'DomainPosture can read and write its settings, certificate state, and generated ParseDMARC configuration directories.', 'No action required.'));
   } catch (error) {
-    checks.push(result('storage', 'Settings storage', 'critical', 'Storage is not writable', error.message, 'Correct ownership and permissions on the MailPosture data directories.', { settings_directory: path.dirname(SETTINGS_PATH), parsedmarc_directory: path.dirname(PARSEDMARC_CONFIG_PATH) }));
+    checks.push(result('storage', 'Settings storage', 'critical', 'Storage is not writable', error.message, 'Correct ownership and permissions on the DomainPosture data directories.', { settings_directory: path.dirname(SETTINGS_PATH), parsedmarc_directory: path.dirname(PARSEDMARC_CONFIG_PATH) }));
+  }
+
+  try {
+    await fs.promises.access(sslMonitor.SSL_WATCH_PATH, fs.constants.X_OK);
+    checks.push(result('ssl_watch', 'ssl-watch', 'healthy', 'Certificate checker available', 'The ssl-watch executable is installed and executable.', 'No action required.', { path: sslMonitor.SSL_WATCH_PATH }));
+  } catch (_) {
+    checks.push(result('ssl_watch', 'ssl-watch', 'critical', 'Certificate checker unavailable', 'The ssl-watch executable is missing or not executable.', 'Rebuild the DomainPosture image with the pinned ssl-watch stage.', { path: sslMonitor.SSL_WATCH_PATH }));
   }
 
   let configContent = '';
@@ -616,17 +700,17 @@ async function systemStatus() {
       const fresh = Number.isFinite(age) && age < 45000;
       const running = heartbeat.state === 'running';
       const heartbeatStatus = fresh && running ? 'healthy' : heartbeat.state === 'error' || !fresh ? 'critical' : 'warning';
-      checks.push(result('parsedmarc_runtime', 'ParseDMARC service', heartbeatStatus, fresh && running ? 'Collector running' : fresh ? `Collector ${heartbeat.state || 'not ready'}` : 'Heartbeat is stale', fresh ? `The standalone supervisor last reported “${heartbeat.state || 'unknown'}”.` : 'MailPosture has not received a current heartbeat from the standalone ParseDMARC supervisor.', heartbeatStatus === 'healthy' ? 'No action required.' : 'Review the ParseDMARC container health and logs.', { heartbeat_at: heartbeat.updated_at || null, state: heartbeat.state || 'unknown', exit_code: heartbeat.exit_code ?? null }));
+      checks.push(result('parsedmarc_runtime', 'ParseDMARC service', heartbeatStatus, fresh && running ? 'Collector running' : fresh ? `Collector ${heartbeat.state || 'not ready'}` : 'Heartbeat is stale', fresh ? `The standalone supervisor last reported “${heartbeat.state || 'unknown'}”.` : 'DomainPosture has not received a current heartbeat from the standalone ParseDMARC supervisor.', heartbeatStatus === 'healthy' ? 'No action required.' : 'Review the ParseDMARC container health and logs.', { heartbeat_at: heartbeat.updated_at || null, state: heartbeat.state || 'unknown', exit_code: heartbeat.exit_code ?? null }));
     } catch (error) {
       checks.push(result('parsedmarc_runtime', 'ParseDMARC service', 'warning', 'Runtime heartbeat unavailable', 'The configuration is available, but this deployment does not expose the optional ParseDMARC runtime heartbeat.', 'Add the ParseDMARC status volume from the current standalone Compose example, then redeploy the stack.', { expected_path: PARSEDMARC_STATUS_PATH }));
     }
   } else {
-    checks.push(result('parsedmarc_runtime', 'ParseDMARC service', 'warning', settings.mailbox.enabled ? 'External runtime not observable' : 'Collector not enabled', settings.mailbox.enabled ? 'MailPosture cannot directly observe an externally managed ParseDMARC process.' : 'ParseDMARC remains idle until report collection is enabled.', settings.mailbox.enabled ? 'Confirm the external service is running and writing reports to OpenSearch.' : 'Enable report collection in Settings when needed.'));
+    checks.push(result('parsedmarc_runtime', 'ParseDMARC service', 'warning', settings.mailbox.enabled ? 'External runtime not observable' : 'Collector not enabled', settings.mailbox.enabled ? 'DomainPosture cannot directly observe an externally managed ParseDMARC process.' : 'ParseDMARC remains idle until report collection is enabled.', settings.mailbox.enabled ? 'Confirm the external service is running and writing reports to OpenSearch.' : 'Enable report collection in Settings when needed.'));
   }
 
   const osConfig = settingsConfig(settings).opensearch;
   if (!osConfig.enabled) {
-    checks.push(result('opensearch', 'OpenSearch', 'warning', 'Report source disabled', 'MailPosture is running live domain checks without historical DMARC or SMTP TLS data.', 'Choose a bundled or external report source in Settings.'));
+    checks.push(result('opensearch', 'OpenSearch', 'warning', 'Report source disabled', 'DomainPosture is running live domain checks without historical DMARC or SMTP TLS data.', 'Choose a bundled or external report source in Settings.'));
   } else {
     let connected = false;
     try {
@@ -643,7 +727,7 @@ async function systemStatus() {
       const breakdown = shardSummary?.groups.map(group => `${group.unassigned_shards} ${group.category.toLowerCase()} shard${group.unassigned_shards === 1 ? '' : 's'}`).join(' and ');
       const clusterSummary = expectedSingleNodeReplicas ? 'Operational on one node' : `Cluster ${rawClusterStatus}`;
       const clusterDetail = expectedSingleNodeReplicas
-        ? `OpenSearch reports yellow because ${shardSummary.total} replica shards cannot be placed on their primary's single node: ${breakdown}. All primary shards and MailPosture report indexes are available.`
+        ? `OpenSearch reports yellow because ${shardSummary.total} replica shards cannot be placed on their primary's single node: ${breakdown}. All primary shards and DomainPosture report indexes are available.`
         : `Authenticated connection succeeded with ${cluster.number_of_nodes || 0} node${cluster.number_of_nodes === 1 ? '' : 's'} and ${cluster.unassigned_shards || 0} unassigned shards.`;
       const clusterAction = clusterStatus === 'healthy'
         ? 'No action required.'
@@ -718,7 +802,7 @@ async function dmarc(domain) {
 
 function get(url, maxBytes = 1048576) {
   return new Promise((resolve, reject) => {
-    const req = (url.startsWith('https:') ? https : http).get(url, { timeout: requestTimeoutMs, headers: { 'user-agent': `MailPosture/${APP_VERSION}` } }, res => {
+    const req = (url.startsWith('https:') ? https : http).get(url, { timeout: requestTimeoutMs, headers: { 'user-agent': `DomainPosture/${APP_VERSION}` } }, res => {
       const chunks = []; let size = 0;
       res.on('data', c => { size += c.length; if (size > maxBytes) req.destroy(new Error('Response is too large')); else chunks.push(c); });
       res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
@@ -786,19 +870,50 @@ async function bimi(domain, dmarcResult, configuredException = null, options = {
   }
 }
 
-function certificate(endpoint) {
-  return new Promise(resolve => {
-    const evidence = { host: endpoint.host, port: endpoint.port };
-    const socket = tls.connect({ host: endpoint.host, port: endpoint.port, servername: endpoint.host, rejectUnauthorized: false, timeout: requestTimeoutMs }, () => {
-      const cert = socket.getPeerCertificate(true); const authorized = socket.authorized; const authError = socket.authorizationError; socket.end();
-      if (!cert.valid_to) return resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', 'critical', `${endpoint.host}:${endpoint.port} unavailable`, 'No peer certificate was returned.', 'Check TLS availability.', evidence));
-      const expiry = new Date(cert.valid_to); const days = Math.floor((expiry - Date.now()) / 86400000); Object.assign(evidence, { issuer: cert.issuer, valid_to: expiry.toISOString(), days_remaining: days, authorized, authorization_error: authError });
-      if (!authorized) return resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', 'critical', 'Certificate not trusted', String(authError), 'Install a publicly trusted certificate for this hostname.', evidence));
-      const status = days < 14 ? 'critical' : days < 30 ? 'warning' : 'healthy'; resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', status, `${days} days remaining`, `${endpoint.host}:${endpoint.port} presents a trusted certificate.`, days < 30 ? 'Confirm renewal is scheduled and working.' : 'No action required.', evidence));
+async function certificate(endpoint) {
+  const checked = await sslMonitor.runCertificateCheck({ domain: endpoint.host, port: endpoint.port, checkType: 'endpoint', timeoutMs: requestTimeoutMs });
+  const status = checked.status === 'good' ? 'healthy' : ['needs_attention', 'urgent'].includes(checked.status) ? 'warning' : 'critical';
+  return result(
+    `tls_${endpoint.host}_${endpoint.port}`,
+    'TLS certificate',
+    status,
+    checked.days_remaining === null ? checked.status_label : `${checked.days_remaining} days remaining`,
+    checked.error || `${endpoint.host}:${endpoint.port} presents a ${checked.chain_valid ? 'trusted' : 'failing'} certificate.`,
+    status === 'healthy' ? 'No action required.' : checked.error ? 'Check routing, TLS service availability, and the ssl-watch installation.' : 'Confirm renewal is scheduled and correct certificate trust or hostname problems.',
+    { ...checked, host: endpoint.host, port: endpoint.port }
+  );
+}
+
+async function domainCertificateComponent(entry, config, options = {}) {
+  const state = getOperationalState();
+  const domainCache = state.certificates[entry.domain] ||= {};
+  const settings = entry.certificate_checks;
+  const checks = [];
+  const definitions = [
+    { enabled: settings.check_public, checkType: 'public' },
+    { enabled: settings.check_origin, checkType: 'origin', originIp: settings.origin_ip }
+  ];
+  for (const definition of definitions) {
+    if (!definition.enabled) continue;
+    const previous = domainCache[definition.checkType] || null;
+    const sameTarget = definition.checkType !== 'origin' || previous?.configured_origin_ip === definition.originIp;
+    if (!options.forceCertificates && sameTarget && sslMonitor.resultIsFresh(previous, config.certificate_check_minutes)) {
+      checks.push(previous);
+      continue;
+    }
+    const checked = await sslMonitor.runCertificateCheck({
+      domain: entry.domain,
+      checkType: definition.checkType,
+      originIp: definition.originIp,
+      timeoutMs: requestTimeoutMs,
+      warningThreshold: config.notifications.ssl_warning_threshold,
+      previous,
+      execute: options.execute
     });
-    socket.on('timeout', () => { socket.destroy(); resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', 'critical', 'Connection timed out', `${endpoint.host}:${endpoint.port} did not respond.`, 'Check routing and service availability.', evidence)); });
-    socket.on('error', error => resolve(result(`tls_${endpoint.host}_${endpoint.port}`, 'TLS certificate', 'critical', 'Connection failed', error.message, 'Check routing and TLS service availability.', evidence)));
-  });
+    domainCache[definition.checkType] = checked;
+    checks.push(checked);
+  }
+  return sslMonitor.componentResult(entry.domain, checks);
 }
 
 async function dkim(domain, selectors, mailProfile = {}) {
@@ -844,7 +959,7 @@ async function configureSnapshots(config, settings) {
   }
   await osApiRequest(config, '_snapshot/mailposture', 'PUT', { type: 'fs', settings: { location: '/usr/share/opensearch/snapshots', compress: true } });
   const policy = {
-    description: 'MailPosture automated OpenSearch snapshots',
+    description: 'DomainPosture automated OpenSearch snapshots',
     creation: { schedule: { cron: { expression: settings.cron, timezone: settings.timezone } }, time_limit: '1h' },
     deletion: {
       schedule: { cron: { expression: settings.delete_cron, timezone: settings.timezone } },
@@ -999,7 +1114,33 @@ async function smtpTlsReports(domain, config, days) {
   } catch (error) { return { available: false, reports: 0, error: error.message, period_days: days }; }
 }
 
-function summarize(domain, checks, reportSections = {}, metadata = {}) { const rank = { healthy: 0, ignored: 0, info: 0, warning: 2, critical: 3 }; return { domain, ...metadata, status: checks.reduce((a, v) => rank[v.status] > rank[a] ? v.status : a, 'healthy'), checks, reports: reportSections, counts: { critical: checks.filter(v => v.status === 'critical').length, warning: checks.filter(v => v.status === 'warning').length, ignored: checks.filter(v => v.status === 'ignored').length, healthy: checks.filter(v => v.status === 'healthy').length } }; }
+function domainScore(checks = []) {
+  const credits = { critical: 0, warning: 0.55, info: 1, ignored: 1, healthy: 1 };
+  if (!checks.length) return 0;
+  const total = checks.reduce((sum, check) => {
+    const explicit = Number(check?.evidence?.score_credit);
+    return sum + (Number.isFinite(explicit) ? Math.max(0, Math.min(1, explicit)) : (credits[check.status] ?? 0));
+  }, 0);
+  return Math.round(total / checks.length * 100);
+}
+
+function summarize(domain, checks, reportSections = {}, metadata = {}) {
+  const rank = { healthy: 0, ignored: 0, info: 0, warning: 2, critical: 3 };
+  return {
+    domain,
+    ...metadata,
+    status: checks.reduce((a, v) => rank[v.status] > rank[a] ? v.status : a, 'healthy'),
+    score: domainScore(checks),
+    checks,
+    reports: reportSections,
+    counts: {
+      critical: checks.filter(v => v.status === 'critical').length,
+      warning: checks.filter(v => v.status === 'warning').length,
+      ignored: checks.filter(v => v.status === 'ignored').length,
+      healthy: checks.filter(v => v.status === 'healthy').length
+    }
+  };
+}
 
 function reconcileMtaSts(stsCheck, smtpCheck) {
   const mode = stsCheck?.evidence?.policy?.mode;
@@ -1009,32 +1150,179 @@ function reconcileMtaSts(stsCheck, smtpCheck) {
   return result('mta_sts', 'MTA-STS', mode === 'enforce' ? 'critical' : 'warning', mode === 'enforce' ? 'Enforced policy cannot be validated' : 'Testing policy is not ready to enforce', `${stsCheck.detail} The active SMTP probe found a STARTTLS or certificate-validation failure at ${failedHosts.join(', ')}.`, 'Correct STARTTLS and certificate validation on every MX host before relying on MTA-STS enforcement.', { ...stsCheck.evidence, smtp_validation_failed_hosts: failedHosts });
 }
 
-async function checkDomain(entry, config) {
+async function checkDomain(entry, config, options = {}) {
   const mailProfile = await resolveSmtpProfile(entry.domain, entry.smtp_profile);
   const noInbound = mailProfile.hosting_type === 'no_inbound';
   const notApplicable = (id, label) => result(id, label, 'info', 'Not applicable', 'This domain is configured not to receive inbound email.', 'No action required while inbound mail remains disabled.', { mail_profile: mailProfile });
-  const dm = await dmarc(entry.domain); const [senderPolicy, stsResult, tlsreport, smtpService, brand, keys, aggregate, failures, smtpTls, reputation, ...certs] = await Promise.all([spfCheck(entry.domain, { timeout_ms: requestTimeoutMs, mail_profile: mailProfile }), noInbound ? Promise.resolve(notApplicable('mta_sts', 'MTA-STS')) : mtaSts(entry.domain), noInbound ? Promise.resolve(notApplicable('tls_rpt', 'TLS reporting')) : tlsRptCheck(entry.domain, { timeout_ms: requestTimeoutMs }), smtpDiagnostics(entry.domain, { timeout_ms: requestTimeoutMs, profile: mailProfile, ehlo_hostname: config.smtp_probe_hostname }), bimi(entry.domain, dm, entry.bimi_exception), dkim(entry.domain, entry.dkim_selectors, mailProfile), reports(entry.domain, config.opensearch, entry.report_days), failureReports(entry.domain, config.opensearch, entry.report_days), smtpTlsReports(entry.domain, config.opensearch, entry.report_days), reputationCheck(entry.domain, { timeout_ms: requestTimeoutMs }), ...entry.tls_endpoints.map(certificate)]);
+  const dm = await dmarc(entry.domain);
+  const values = await Promise.all([
+    spfCheck(entry.domain, { timeout_ms: requestTimeoutMs, mail_profile: mailProfile }),
+    noInbound ? Promise.resolve(notApplicable('mta_sts', 'MTA-STS')) : mtaSts(entry.domain),
+    noInbound ? Promise.resolve(notApplicable('tls_rpt', 'TLS reporting')) : tlsRptCheck(entry.domain, { timeout_ms: requestTimeoutMs }),
+    smtpDiagnostics(entry.domain, { timeout_ms: requestTimeoutMs, profile: mailProfile, ehlo_hostname: config.smtp_probe_hostname }),
+    bimi(entry.domain, dm, entry.bimi_exception),
+    dkim(entry.domain, entry.dkim_selectors, mailProfile),
+    reports(entry.domain, config.opensearch, entry.report_days),
+    failureReports(entry.domain, config.opensearch, entry.report_days),
+    smtpTlsReports(entry.domain, config.opensearch, entry.report_days),
+    reputationCheck(entry.domain, { timeout_ms: requestTimeoutMs }),
+    ...entry.tls_endpoints.map(certificate),
+    domainCertificateComponent(entry, config, options)
+  ]);
+  const [senderPolicy, stsResult, tlsreport, smtpService, brand, keys, aggregate, failures, smtpTls, reputation] = values;
+  const certs = values.slice(10, -1);
+  const sslCertificates = values.at(-1);
   let sts = reconcileMtaSts(stsResult, smtpService);
   if (!noInbound && isMissingMtaSts(sts)) sts = applyMissingControlException(sts, entry.control_exception?.mta_sts, 'mta_sts_absent');
-  if (!certs.length) {
-    let certificateConfiguration = noInbound ? notApplicable('tls_config', 'TLS certificate') : result('tls_config', 'TLS certificate', 'warning', 'No endpoints configured', 'No certificate endpoints are configured for this domain.', 'Add a TLS endpoint for this domain in Settings, or ignore intentionally absent certificate monitoring.', { domain: entry.domain, host: entry.domain, port: null });
-    if (!noInbound) certificateConfiguration = applyMissingControlException(certificateConfiguration, entry.control_exception?.tls_certificates, 'tls_certificates_absent');
-    certs.push(certificateConfiguration);
-  }
-  return summarize(entry.domain, [dm, senderPolicy, aggregate, keys, sts, tlsreport, smtpService, ...certs, brand, reputation], { aggregate: aggregate.evidence || {}, failure: failures, smtp_tls: smtpTls, smtp_diagnostics: smtpService.evidence || {} }, { mail_profile: mailProfile });
+  return summarize(entry.domain, [dm, senderPolicy, aggregate, keys, sts, tlsreport, smtpService, sslCertificates, ...certs, brand, reputation], { aggregate: aggregate.evidence || {}, failure: failures, smtp_tls: smtpTls, smtp_diagnostics: smtpService.evidence || {} }, { mail_profile: mailProfile });
 }
 function demo() {
   const aggregate = { period_days: 7, total: 15234, passed: 13985, failed: 1249, pass_rate: 91.8, dkim_pass_rate: 89.7, spf_pass_rate: 96.2, passed_dkim_aligned_rate:97.7,passed_spf_aligned_rate:96.4,failed_dkim_aligned_rate:0,failed_spf_aligned_rate:0, reporters:[{name:'Example Receiver',domain:'example.net',reports:7,messages:10200,last_report:'2026-09-02T23:59:59Z'},{name:'Mailbox Provider',domain:'mail.example.org',reports:6,messages:5034,last_report:'2026-09-02T23:59:59Z'}], timeline: [{date:'2026-08-27',total:1820,failed:180},{date:'2026-08-28',total:2110,failed:220},{date:'2026-08-29',total:1984,failed:175},{date:'2026-08-30',total:2400,failed:164},{date:'2026-08-31',total:2290,failed:190},{date:'2026-09-01',total:2510,failed:200},{date:'2026-09-02',total:2120,failed:120}], top_failing_sources:[{ip:'192.0.2.10',fqdn:'outbound.example.net',network_owner:'Example Mail',messages:620},{ip:'198.51.100.8',fqdn:'relay.example.org',messages:381}] };
   const aggregateCheck = result('dmarc_reports','DMARC reports','critical','91.8% aligned','1,249 messages failed in 7 days.','Review the top failing sources.',aggregate);
   const smtpEndpoint = evaluateSmtpEvidence('mail.example.com', { host:'mail.example.com',port:25,ip_address:'192.0.2.25',ehlo_identity:'[192.0.2.100]',connection_time_ms:7300,transaction_time_ms:7966,reverse_dns:['mail.example.com'],forward_confirmed:true,ptr_matches_host:true,reverse_dns_match:true,banner:'220 mail.example.com ESMTP ready',banner_hostname:'mail.example.com',banner_matches_reverse_dns:true,starttls_advertised:true,starttls_negotiated:true,tls_authorized:true,tls_protocol:'TLSv1.3',tls_cipher:'TLS_AES_256_GCM_SHA384',relay_status:'denied',rcpt_to_code:550,transcript:['S: 220 mail.example.com ESMTP ready','C: EHLO [192.0.2.100]','S: 250-mail.example.com','S: 250 STARTTLS','C: STARTTLS','S: 220 Ready to start TLS','C: EHLO [192.0.2.100]','S: 250 mail.example.com','C: MAIL FROM:<probe@example.com>','S: 250 Sender accepted','C: RCPT TO:<probe@example.net>','S: 550 Relaying denied','C: RSET','S: 250 Reset'] });
   const smtpService = smtpResult('example.com', [{priority:10,exchange:'mail.example.com'}], [smtpEndpoint]);
+  const certificateCheckedAt = new Date().toISOString();
+  const publicCertificate = sslMonitor.normalizeResult({ common_name:'example.com',subject:'CN=example.com',issuer:'CN=Example Public CA',sans:['example.com','www.example.com'],not_before:'2026-09-01T00:00:00Z',not_after:'2026-12-04T19:00:35Z',days_remaining:59,used_ip:'203.0.113.10',tls_version:'TLS 1.3',cipher_suite:'TLS_AES_128_GCM_SHA256',chain_valid:true,fingerprint:'demo-public-fingerprint' }, { domain:'example.com',checkType:'public',checkedAt:certificateCheckedAt });
+  const originCertificate = sslMonitor.normalizeResult({ common_name:'example.com',subject:'CN=example.com',issuer:'CN=Example Origin CA',sans:['example.com'],not_before:'2026-09-28T00:00:00Z',not_after:'2026-12-27T16:39:50Z',days_remaining:82,used_ip:'192.0.2.10',tls_version:'TLS 1.3',cipher_suite:'TLS_AES_128_GCM_SHA256',chain_valid:true,fingerprint:'demo-origin-fingerprint' }, { domain:'example.com',checkType:'origin',originIp:'192.0.2.10',checkedAt:certificateCheckedAt });
+  const certificateComponent = sslMonitor.componentResult('example.com', [publicCertificate, originCertificate]);
   const smtpTls = {available:true,reports:4,successful:8200,failed:14,success_rate:99.8,timeline:[{date:'2026-08-30',successful:1800,failed:6},{date:'2026-09-01',successful:3200,failed:5},{date:'2026-09-02',successful:3200,failed:3}],failure_types:[{type:'validation-failure',count:9},{type:'starttls-not-supported',count:5}],organizations:[{name:'Example Reporter',domains:['example.net'],reports:4,sessions:8214}],raw_samples:[{index:'smtp_tls-2026.09',organization_name:'Example Reporter',contact_info:'tls@example.net',report_id:'demo-report',date_begin:'2026-09-01T00:00:00Z',source_fields:['contact_info','date_begin','organization_name','policies','report_id']}] };
-  return summarize('example.com', [result('dmarc','DMARC','warning','Quarantine · 25%','Enforcement covers only 25%.','Increase enforcement after resolving legitimate senders.'), result('spf','SPF','healthy','Valid policy · 2/10 lookups','One SPF record is published and ends in -all.','Review the policy when senders change.'), aggregateCheck, result('dkim','DKIM','warning','1/2 selectors healthy','legacy: 1024-bit key','Rotate the legacy key.'), result('mta_sts','MTA-STS','healthy','Enforced','Every MX host is covered.','Rotate the DNS id whenever the policy changes.'), result('tls_rpt','TLS reporting','healthy','1 report destination','Valid TLSRPTv1 policy using mailto.','Review TLS reports.'), smtpService, result('tls_demo','TLS certificate','healthy','64 days remaining','Certificate is trusted.','No action required.',{host:'mail.example.com',port:465,days_remaining:64}), result('bimi','BIMI','ignored','Self-asserted logo · Ignored','No mark certificate is published. This review item is ignored permanently.','No action is required while this exception remains active.',{ignored:true,ignore_mode:'permanent',original_status:'warning'}), result('reputation','IP and domain reputation','healthy','No blocklist matches','Three DNS-blocklist checks completed.','Continue monitoring.',{checks:[]})], { aggregate, failure:{available:false,count:0,period_days:7}, smtp_tls:smtpTls, smtp_diagnostics:smtpService.evidence }, { mail_profile: smtpService.evidence.profile });
+  return summarize('example.com', [result('dmarc','DMARC','warning','Quarantine · 25%','Enforcement covers only 25%.','Increase enforcement after resolving legitimate senders.'), result('spf','SPF','healthy','Valid policy · 2/10 lookups','One SPF record is published and ends in -all.','Review the policy when senders change.'), aggregateCheck, result('dkim','DKIM','warning','1/2 selectors healthy','legacy: 1024-bit key','Rotate the legacy key.'), result('mta_sts','MTA-STS','healthy','Enforced','Every MX host is covered.','Rotate the DNS id whenever the policy changes.'), result('tls_rpt','TLS reporting','healthy','1 report destination','Valid TLSRPTv1 policy using mailto.','Review TLS reports.'), smtpService, certificateComponent, result('bimi','BIMI','ignored','Self-asserted logo · Ignored','No mark certificate is published. This review item is ignored permanently.','No action is required while this exception remains active.',{ignored:true,ignore_mode:'permanent',original_status:'warning'}), result('reputation','IP and domain reputation','healthy','No blocklist matches','Three DNS-blocklist checks completed.','Continue monitoring.',{checks:[]})], { aggregate, failure:{available:false,count:0,period_days:7}, smtp_tls:smtpTls, smtp_diagnostics:smtpService.evidence }, { mail_profile: smtpService.evidence.profile });
 }
 
-async function refresh() {
-  if (activeRefresh) return activeRefresh; snapshot.refreshing = true;
-  activeRefresh = (async () => { try { const config = process.env.DEMO_MODE === 'true' ? null : settingsConfig(); const domains = config ? await Promise.all(config.domains.map(v => checkDomain(v, config))) : [demo()]; snapshot = { version: APP_VERSION, generated_at: new Date().toISOString(), refreshing: false, configuration_required: !domains.length, domains, summary: { critical: domains.reduce((n,d)=>n+d.counts.critical,0), warning: domains.reduce((n,d)=>n+d.counts.warning,0), ignored: domains.reduce((n,d)=>n+(d.counts.ignored || 0),0), healthy: domains.reduce((n,d)=>n+d.counts.healthy,0) } }; } catch (error) { addDiagnosticEvent('mailposture', 'error', 'Domain checks failed', error.message); snapshot = { ...snapshot, generated_at: new Date().toISOString(), refreshing: false, error: error.message }; } finally { activeRefresh = null; } return snapshot; })(); return activeRefresh;
+function sendDiscordMessage(content, webhook = discordWebhookUrl()) {
+  if (!webhook) return Promise.resolve(false);
+  const body = JSON.stringify({ content: String(content || '').slice(0, 1900), allowed_mentions: { parse: [] } });
+  return new Promise(resolve => {
+    const request = https.request(webhook, {
+      method: 'POST',
+      timeout: Math.min(requestTimeoutMs, 10000),
+      headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'user-agent': `DomainPosture/${APP_VERSION}` }
+    }, response => {
+      response.resume();
+      response.on('end', () => resolve(response.statusCode >= 200 && response.statusCode < 300));
+    });
+    request.on('timeout', () => { request.destroy(); resolve(false); });
+    request.on('error', () => resolve(false));
+    request.end(body);
+  });
+}
+
+function milestoneSeverity(value, milestones) {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === 'string') return 100;
+  const ordered = [...milestones].sort((a, b) => b - a);
+  const index = ordered.indexOf(Number(value));
+  return index < 0 ? 1 : index + 1;
+}
+
+function certificateAlertMessage(domain, certificate, milestone) {
+  const title = milestone === 'expired' ? 'SSL Certificate Expired' : milestone === 'invalid' ? 'SSL Certificate Invalid' : milestone === 'check_failed' ? 'SSL Certificate Check Failed' : 'SSL Certificate Expiring Soon';
+  const lines = [
+    `**DomainPosture: ${title}**`,
+    `Domain: ${domain}`,
+    `Check: ${certificate.check_type === 'origin' ? 'Origin' : 'Public'}`
+  ];
+  if (certificate.check_type === 'origin' && certificate.configured_origin_ip) lines.push(`Origin IP: ${certificate.configured_origin_ip}`);
+  if (certificate.issuer) lines.push(`Issuer: ${certificate.issuer}`);
+  if (certificate.not_after) lines.push(`Expires: ${certificate.not_after}`);
+  if (certificate.days_remaining !== null) lines.push(`Days remaining: ${certificate.days_remaining}`);
+  if (certificate.error) lines.push(`Issue: ${certificate.error}`);
+  return lines.join('\n');
+}
+
+async function processNotifications(domainResult, settings, send = sendDiscordMessage, options = {}) {
+  const state = options.state || getOperationalState().notifications;
+  const webhookReady = options.webhookReady ?? Boolean(discordWebhookUrl());
+  const certificates = domainResult.checks.find(check => check.id === 'ssl_certificates')?.evidence?.checks || [];
+  for (const certificate of certificates) {
+    const key = `${domainResult.domain}:${certificate.check_type}`;
+    const previous = state.certificates[key];
+    const milestone = sslMonitor.milestoneFor(certificate, settings.ssl_milestones);
+    const current = {
+      initialized: true,
+      active: milestone !== null,
+      last_milestone: milestone,
+      status: certificate.status,
+      fingerprint: certificate.fingerprint || null,
+      updated_at: certificate.checked_at
+    };
+    if (!previous) { state.certificates[key] = current; continue; }
+    let message = null;
+    if (previous.active && !current.active) {
+      message = `**DomainPosture: SSL Certificate Recovered**\nDomain: ${domainResult.domain}\nCheck: ${certificate.check_type === 'origin' ? 'Origin' : 'Public'}${certificate.check_type === 'origin' && certificate.configured_origin_ip ? `\nOrigin IP: ${certificate.configured_origin_ip}` : ''}${certificate.not_after ? `\nExpires: ${certificate.not_after}` : ''}`;
+    } else if (current.active && (
+      !previous.active ||
+      (typeof milestone === 'string' && milestone !== previous.last_milestone) ||
+      milestoneSeverity(milestone, settings.ssl_milestones) > milestoneSeverity(previous.last_milestone, settings.ssl_milestones)
+    )) {
+      message = certificateAlertMessage(domainResult.domain, certificate, milestone);
+    }
+    if (message && settings.discord_enabled && settings.ssl_enabled && webhookReady) {
+      if (await send(message)) state.certificates[key] = current;
+    } else {
+      state.certificates[key] = current;
+    }
+  }
+
+  const previousDomain = state.domains[domainResult.domain];
+  const attention = ['warning', 'critical'].includes(domainResult.status);
+  const currentDomain = { initialized: true, attention, status: domainResult.status, score: domainResult.score, updated_at: new Date().toISOString() };
+  if (!previousDomain) { state.domains[domainResult.domain] = currentDomain; return; }
+  let domainMessage = null;
+  if (!previousDomain.attention && attention) {
+    const issues = domainResult.checks.filter(check => ['warning', 'critical'].includes(check.status)).slice(0, 8).map(check => `- ${check.label}: ${check.summary}`);
+    domainMessage = `**DomainPosture: Domain Needs Attention**\nDomain: ${domainResult.domain}\nScore: ${domainResult.score}\n\nIssues:\n${issues.join('\n')}`;
+  } else if (previousDomain.attention && !attention) {
+    domainMessage = `**DomainPosture: Domain Recovered**\nDomain: ${domainResult.domain}\nScore: ${domainResult.score}\nStatus: Healthy`;
+  }
+  if (domainMessage && settings.discord_enabled && settings.needs_attention_enabled && webhookReady) {
+    if (await send(domainMessage)) state.domains[domainResult.domain] = currentDomain;
+  } else {
+    state.domains[domainResult.domain] = currentDomain;
+  }
+}
+
+async function refresh(options = {}) {
+  if (activeRefresh) return activeRefresh;
+  snapshot.refreshing = true;
+  activeRefresh = (async () => {
+    try {
+      const config = process.env.DEMO_MODE === 'true' ? null : settingsConfig();
+      let domains;
+      if (!config) {
+        domains = [demo()];
+      } else {
+        const entries = options.domain ? config.domains.filter(entry => entry.domain === options.domain) : config.domains;
+        if (options.domain && !entries.length) throw new Error('The requested domain is not monitored.');
+        const checked = await Promise.all(entries.map(entry => checkDomain(entry, config, { forceCertificates: options.forceCertificates === true })));
+        if (options.domain) {
+          const replacements = new Map(checked.map(domain => [domain.domain, domain]));
+          domains = snapshot.domains.map(domain => replacements.get(domain.domain) || domain);
+          for (const domain of checked) if (!domains.some(existing => existing.domain === domain.domain)) domains.push(domain);
+        } else domains = checked;
+        for (const domain of checked) await processNotifications(domain, config.notifications);
+        await saveOperationalState();
+      }
+      snapshot = {
+        version: APP_VERSION,
+        generated_at: new Date().toISOString(),
+        refreshing: false,
+        configuration_required: !domains.length,
+        domains,
+        summary: {
+          critical: domains.reduce((n, d) => n + d.counts.critical, 0),
+          warning: domains.reduce((n, d) => n + d.counts.warning, 0),
+          ignored: domains.reduce((n, d) => n + (d.counts.ignored || 0), 0),
+          healthy: domains.reduce((n, d) => n + d.counts.healthy, 0)
+        }
+      };
+    } catch (error) {
+      addDiagnosticEvent('domainposture', 'error', 'Domain checks failed', error.message);
+      snapshot = { ...snapshot, generated_at: new Date().toISOString(), refreshing: false, error: error.message };
+    } finally { activeRefresh = null; }
+    return snapshot;
+  })();
+  return activeRefresh;
 }
 
 function serveBimiLogo(res, requestUrl) {
@@ -1053,6 +1341,11 @@ function serveBimiLogo(res, requestUrl) {
 
 function json(res, status, value) { const body = JSON.stringify(value); res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(body); }
 function requestJson(req, maxBytes = 65536) { return new Promise((resolve, reject) => { const chunks = []; let size = 0; req.on('data', chunk => { size += chunk.length; if (size > maxBytes) { reject(new Error('Settings request is too large')); req.destroy(); } else chunks.push(chunk); }); req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')); } catch (_) { reject(new Error('Settings must be valid JSON')); } }); req.on('error', reject); }); }
+function sameOriginRequest(req) {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try { return new URL(origin).host === req.headers.host; } catch (_) { return false; }
+}
 function staticFile(req, res) { const pathname = req.url.split('?')[0]; const name = ['/', '/domains', '/status', '/settings', '/help'].includes(pathname) ? 'index.html' : pathname.replace(/^\//, ''); const file = path.normalize(path.join(PUBLIC, name)); if (!file.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); } fs.readFile(file, (e, data) => { if (e) { res.writeHead(404); return res.end(); } const type = { '.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.svg':'image/svg+xml' }[path.extname(file)] || 'application/octet-stream'; res.writeHead(200, { 'content-type': type, 'x-content-type-options':'nosniff' }); res.end(data); }); }
 function scheduleRefresh(minutes) { if (refreshTimer) clearInterval(refreshTimer); refreshTimer = setInterval(refresh, Math.max(1, minutes) * 60000); refreshTimer.unref(); }
 const server = http.createServer(async (req,res) => {
@@ -1063,16 +1356,31 @@ const server = http.createServer(async (req,res) => {
   if (pathname === '/api/system-status' && req.method === 'GET') { try { return json(res, 200, await systemStatus()); } catch (error) { return json(res, 500, { version: APP_VERSION, checked_at: new Date().toISOString(), status: 'critical', checks: [], error: error.message }); } }
   if (pathname === '/api/system-logs' && req.method === 'GET') return json(res, 200, diagnosticLog());
   if (pathname === '/api/service-logs' && req.method === 'GET') {
-    const service = requestUrl.searchParams.get('service') || 'mailposture';
-    if (!Object.hasOwn(SERVICE_LOG_PATHS, service)) return json(res, 400, { error: 'Choose MailPosture, OpenSearch, or ParseDMARC.' });
+    const service = requestUrl.searchParams.get('service') || 'domainposture';
+    if (!Object.hasOwn(SERVICE_LOG_PATHS, service)) return json(res, 400, { error: 'Choose DomainPosture, OpenSearch, or ParseDMARC.' });
     return json(res, 200, await serviceLog(service));
   }
   if (pathname === '/api/bimi-logo' && req.method === 'GET') return serveBimiLogo(res, requestUrl);
-  if (pathname === '/api/refresh' && req.method === 'POST') return json(res,202,await refresh());
+  if (pathname === '/api/refresh' && req.method === 'POST') {
+    if (!sameOriginRequest(req)) return json(res, 403, { error: 'Cross-origin requests are not allowed.' });
+    if (activeRefresh) await activeRefresh;
+    return json(res, 202, await refresh({ forceCertificates: true }));
+  }
+  const domainCheckMatch = pathname.match(/^\/api\/domains\/([^/]+)\/check$/);
+  if (domainCheckMatch && req.method === 'POST') {
+    if (!sameOriginRequest(req)) return json(res, 403, { error: 'Cross-origin requests are not allowed.' });
+    let domain;
+    try { domain = decodeURIComponent(domainCheckMatch[1]).toLowerCase().replace(/\.$/, ''); } catch (_) { return json(res, 400, { error: 'Invalid domain path.' }); }
+    if (!validDomain(domain)) return json(res, 400, { error: 'Invalid domain.' });
+    try { if (process.env.DEMO_MODE !== 'true' && !getSettings().monitored_domains.includes(domain)) return json(res, 404, { error: 'The requested domain is not monitored.' }); }
+    catch (error) { return json(res, 500, { error: error.message }); }
+    if (activeRefresh) await activeRefresh;
+    return json(res, 202, await refresh({ domain, forceCertificates: true }));
+  }
   if (pathname === '/api/settings' && req.method === 'GET') { try { return json(res, 200, publicSettings()); } catch (error) { return json(res, 500, { error: error.message }); } }
-  if (pathname === '/api/settings' && req.method === 'PUT') { try { const settings = await saveSettings(await requestJson(req)); if (activeRefresh) await activeRefresh; await refresh(); return json(res, 200, settings); } catch (error) { return json(res, 400, { error: error.message }); } }
+  if (pathname === '/api/settings' && req.method === 'PUT') { try { if (!sameOriginRequest(req)) return json(res, 403, { error: 'Cross-origin requests are not allowed.' }); const settings = await saveSettings(await requestJson(req)); if (activeRefresh) await activeRefresh; await refresh(); return json(res, 200, settings); } catch (error) { return json(res, 400, { error: error.message }); } }
   staticFile(req,res);
 });
-function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`MailPosture listening on :${PORT}`); addDiagnosticEvent('mailposture', 'info', 'MailPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
+function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`DomainPosture listening on :${PORT}`); addDiagnosticEvent('domainposture', 'info', 'DomainPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeControlExceptions, normalizeSmtpProfiles, activeBimiException, applyMissingControlException, isMissingMtaSts, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, refresh, getSnapshot:()=>snapshot };
+module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeControlExceptions, normalizeSmtpProfiles, normalizeCertificateChecks, normalizeNotifications, activeBimiException, applyMissingControlException, isMissingMtaSts, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, domainScore, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, certificate, domainCertificateComponent, processNotifications, sameOriginRequest, refresh, getOperationalState, getSnapshot:()=>snapshot };

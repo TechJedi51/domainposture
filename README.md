@@ -1,326 +1,242 @@
-# MailPosture with Dockhand
+# DomainPosture
 
-MailPosture is a generic, management-focused status page for SPF, DMARC aggregate and failure reports, SMTP TLS reports, live SMTP service diagnostics, DKIM, MTA-STS, TLS certificates, BIMI, and limited IP/domain reputation screening. It contains no user-specific domain configuration. Operational settings are entered in the web interface and saved in persistent storage; Dockhand supplies deployment secrets and storage paths.
+DomainPosture 3.0.0 is a focused domain-health dashboard. It combines the existing email posture checks and report analysis with public and origin SSL/TLS certificate monitoring. Add a domain, keep public certificate monitoring enabled, optionally add an origin IP, and DomainPosture schedules and explains the checks.
 
-## Included files
+The application evolved in place from MailPosture. Existing domains, settings, report data, ParseDMARC configuration, OpenSearch data, snapshots, and Docker volumes remain usable. Some legacy internal names are intentionally retained where renaming them would risk data loss; see [Upgrading from MailPosture](#upgrading-from-mailposture).
 
-```text
-mailposture/
-├── .github/workflows/       # Tests and publishes the image to GHCR
-├── docker-compose.yml
-├── compose.standalone.yml
-├── Dockerfile
-├── .env.example
-├── server.js
-├── smtp.js
-├── dns-security.js
-├── public/
-└── test/
-```
+## What it checks
 
-Use `docker-compose.yml` when parsedmarc and OpenSearch already exist. Use `compose.standalone.yml` to deploy MailPosture, the official `ghcr.io/domainaware/parsedmarc` image, and OpenSearch together. They remain separate containers so each service can be upgraded, restarted, secured, and backed up independently.
+- SPF, DKIM, DMARC, BIMI, MTA-STS, and TLS reporting DNS and policy controls
+- DMARC aggregate and optional failure-report data from OpenSearch
+- SMTP TLS report data from OpenSearch
+- Live MX SMTP reachability, greeting, STARTTLS, certificate trust, and relay behavior
+- Limited IP and domain reputation signals
+- Public HTTPS certificates resolved through normal DNS
+- Optional origin HTTPS certificates reached at a specific IPv4 or IPv6 address while using the domain for SNI and hostname validation
 
-## Interface
+The dashboard translates those checks into **Healthy**, **Needs Attention**, and **Critical** states and a 0–100 Domain Score. It is not a general-purpose infrastructure monitoring system.
 
-- **Dashboard** shows the organization-wide score, domain scores, open issues, stacked aggregate DMARC trends, optional DMARC failure-report counts, and stacked SMTP TLS results.
-- **Domains** shows the detailed status, report center, attention queue, SMTP diagnostics, evidence, and control matrix for one domain at a time.
-- **System Status** directly checks MailPosture storage and refreshes, OpenSearch authentication and cluster health, report indexes, the generated ParseDMARC configuration, and the bundled collector heartbeat. It includes both a privacy-safe operational event log and bounded, redacted service-log views for the standalone MailPosture, OpenSearch, and ParseDMARC services.
-- **Settings** separates monitored domains, appearance, OpenSearch, and parsedmarc configuration into accessible tabs with keyboard navigation.
-- **Help** explains setup, every check, and the terminology used by the application.
+## Architecture
 
-## Settings screen
+DomainPosture remains a small Node.js service with a static browser interface. Settings and operational state are JSON files under `/data`; there is no SQL database. ParseDMARC and OpenSearch remain separate services.
 
-After the first deployment, select the gear button in MailPosture. The Monitored domains, Appearance, OpenSearch, and parsedmarc tabs make room for each service's related options.
+Two Compose configurations are included:
 
-### Domains
+- `docker-compose.yml` connects DomainPosture to existing ParseDMARC and OpenSearch services.
+- `compose.standalone.yml` runs DomainPosture, the official ParseDMARC image, and OpenSearch together.
 
-Select the plus button to add a domain. Use the edit button beside a domain to change its name; select its inbound-mail hosting type and provider; identify whether relay probes run from a trusted or external network; or manage its DKIM selectors and TLS certificate endpoints. Automatic provider detection recognizes Google Workspace, Microsoft 365, Hover Mail, iCloud Mail, and self-hosted MX names. Kerio Connect can be selected for a self-hosted domain because its product identity cannot be determined reliably from public DNS. Domain removal remains pending until **Save settings** is selected.
+The container includes `ssl-watch` v1.17.2 as `/usr/local/bin/ssl-watch`. It is copied from the upstream image in a multi-stage build. The final Alpine image installs the CA trust store and verifies that the executable is present during the build. `ssl-watch` remains a short-lived CLI process; no extra daemon or privileged container is introduced.
 
-The domain dashboard, domain cards, Settings list, and SMTP diagnostics show the effective hosting type and provider. Each value is labeled **Auto-detected** or **Selected** so operators can distinguish DNS-derived classification from an explicit configuration choice.
+## Certificate monitoring
 
-Add every domain that appears after the `@` in an organization-managed From address.
+Each domain has these settings in the existing Add/Edit Domain dialog:
 
-### DKIM selectors
+- **Check Public Certificate** — enabled by default
+- **Check Origin Certificate** — disabled by default
+- **Origin IP** — shown and required only when origin checking is enabled
 
-Edit a domain, then add each active selector by its label, such as `selector1` or `google`. An omitted domain receives a visible “No selectors configured” warning. DKIM selectors cannot be discovered reliably from DNS.
+At least one certificate path must be enabled. Domain names and IPv4/IPv6 addresses are validated in the browser and again on the server.
 
-### TLS certificate endpoints
+### Public and origin checks
 
-Edit a domain, then add each endpoint as a host and port, such as `mta-sts.example.com` on port `443` or `mail.example.com` on port `465`.
-
-Direct TLS endpoints such as HTTPS 443, SMTP 465, and IMAP 993 are supported. MailPosture also discovers every monitored domain’s published MX hosts and probes SMTP on TCP port 25. It checks reachability and the SMTP greeting, negotiates STARTTLS before testing the mail envelope, validates certificate trust against the MX hostname, and checks whether an unauthenticated external recipient is rejected. Reverse DNS, banner alignment, and timing from one location remain visible as supporting diagnostics; valid provider-owned identities and slow single-location timing are informational rather than protocol failures. Results reflect MailPosture’s network location, and the container must be allowed outbound TCP port 25. When the receiving provider blocks the monitoring source address, TLS and relay checks are labeled **Not tested** rather than failed. The relay probe uses reserved example addresses and stops before `DATA`; it never submits message content. If the recipient is accepted, the result is critical only when the domain is configured to identify this installation as external and untrusted. Otherwise MailPosture requests external verification.
-
-Under **Monitoring behavior**, optionally provide a public SMTP probe hostname whose A/AAAA and PTR records identify this MailPosture installation. When it is blank, MailPosture uses the local connection address as an SMTP address literal instead of claiming an unresolvable hostname.
-
-The Domains button opens a status-aware menu. Under **Settings → Appearance**, choose whether that menu lists domains by priority—needs action, review, then healthy—or alphabetically. This preference is stored in the current browser with the color-mode preference.
-
-### Report source
-
-Choose **Bundled services** with `compose.standalone.yml`, **External OpenSearch** when an existing parsedmarc/OpenSearch deployment supplies the data, or **Live checks only** to disable historical reporting. The OpenSearch password remains a Dockhand secret and is never returned to the browser.
-
-### Report mailbox
-
-One mailbox is normally sufficient for every monitored domain. Point each domain's DMARC `rua` and TLS-RPT `rua` address—or aliases for those addresses—to the same account. parsedmarc watches the configured incoming folder and sorts messages below the configured archive folder:
+The public path uses normal DNS resolution:
 
 ```text
-Archive/
-├── Aggregate
-├── Failure
-├── Invalid
-├── SMTP-TLS
-└── Unsaved
+ssl-watch -domain example.com -port 443 -output json -fingerprint
 ```
 
-Saving Settings writes `/data/parsedmarc/config.ini`. The standalone Compose file mounts that generated file at parsedmarc's active `/etc/parsedmarc/config.ini` path and reloads parsedmarc automatically within 10 seconds when it changes. An external parsedmarc deployment must mount the same generated directory—or copy the file to its configured path—and must be restarted by its own service manager.
-
-The standalone stack also uses the small `parsedmarc_status` Docker volume for a runtime heartbeat. MailPosture reads this volume but cannot modify it. ParseDMARC updates it while waiting, running, reloading, or after an unexpected exit. This provides process visibility without granting MailPosture access to the Docker socket. External ParseDMARC deployments remain observable through configuration and OpenSearch report checks, but their process state is reported as unavailable unless they provide a compatible heartbeat.
-
-`Archive/SMTP-TLS` contains the original TLS-RPT messages after parsedmarc processes them. MailPosture does not read or parse that folder. It reads the normalized documents that parsedmarc writes to the configured `smtp_tls*` OpenSearch index, which prevents duplicate processing and mailbox conflicts.
-
-DMARC aggregate failures and DMARC failure reports are different measurements. Aggregate reports count messages that failed DMARC. Failure reports, also called RUF or forensic reports, are optional individual reports that many receivers do not send. It is therefore normal for an aggregate report to show failed messages while the RUF report count is zero. MailPosture shows only RUF counts because those reports may contain personal or confidential message data.
-
-The aggregate report card separates messages that passed DMARC from messages that failed it. DKIM-aligned and SPF-aligned percentages use only the messages in their respective row. Because DMARC needs either aligned DKIM or aligned SPF, those percentages can overlap. The DMARC reports list identifies the receiving organizations and reporter domains found in the 1,000 most recent matching OpenSearch documents; totals and alignment rates still use all matching documents in the selected period.
-
-TLS reporting organizations are the outside mail providers that sent TLS-RPT data about delivery attempts to a monitored domain. Their values count SMTP sessions, not email messages. MailPosture recognizes current and legacy parsedmarc organization fields. When a report has no recognized name, the interface says **Reporter name not provided** and provides a limited raw-field view so you can verify what was stored without exposing policy details or message content.
-
-The SPF check validates that exactly one SPF policy is published, expands static `include` and `redirect` references, checks the RFC limit of 10 DNS-querying terms, flags recursive references and malformed IP networks, and distinguishes `-all`, `~all`, and unsafe catch-all policies. DNS timeouts produce an incomplete or unavailable result instead of a false pass.
-
-The TLS-RPT check looks up `_smtp._tls.<domain>`, requires exactly one `v=TLSRPTv1` record, and validates each `rua` destination as a `mailto` or HTTPS URI. This DNS policy check is separate from the report history collected by parsedmarc.
-
-The reputation check performs a limited DNS-based screen of the monitored domain through Spamhaus DBL and the domain's receiving MX addresses through Spamhaus ZEN and SpamCop. It does not replace a deliverability service, and receiving MX addresses are often different from outbound sending addresses. Provider access failures are shown as unavailable and never as clean. Verify a reported listing with the named provider before remediation; DNS blocklists have their own access and removal policies.
-
-Top failing DMARC sources include the source IP address and, when available, parsedmarc's saved host name, base domain, and network owner. If no saved host name exists, MailPosture attempts a bounded reverse-DNS lookup. A PTR name is supporting context and is not proof that the named organization authorized the traffic.
-
-When BIMI publishes a safe SVG logo over HTTPS and passes validation, MailPosture displays it on the BIMI control card through a same-origin, sandboxed image response. Remote logo markup is not inserted into the page. A domain editor can independently ignore an intentionally self-asserted logo or intentionally absent logo permanently or for 1–120 months. The BIMI card remains visible and labeled **Ignored**; invalid records, unsafe logos, and unmet DMARC prerequisites are never suppressed.
-
-The domain editor can also ignore intentionally absent MTA-STS and TLS certificate monitoring permanently or for 1–120 months. These controls remain visible and labeled **Ignored**, are removed from the attention queue, and do not lower the posture score. The MTA-STS exception applies only when no STSv1 DNS signal exists; partial or invalid policies remain actionable. The TLS certificate exception applies only when no certificate endpoints are configured; failures, trust errors, and expiration warnings from configured endpoints remain actionable.
-
-The parsedmarc tab manages the general, mailbox, IMAP, and OpenSearch options used by the bundled IMAP-to-OpenSearch pipeline. Monthly indexes are enabled by default for new configurations to avoid creating a large number of small report indexes. For a single OpenSearch node, use one shard and zero replicas. Less common outputs and collectors, including Kafka, S3, Splunk, Gmail API, and Microsoft Graph, remain advanced file-based configuration. MailPosture does not parse, move, or delete report messages itself; parsedmarc performs the configured mailbox actions.
-
-### System Status troubleshooting
-
-A yellow OpenSearch cluster is expected when a single-node cluster has replica shards configured because OpenSearch will not place a replica on the same node as its primary. MailPosture inspects every unassigned shard and separates report indexes, OpenSearch security audit logs, internal indexes, and other indexes. When all unassigned shards are replicas and no MailPosture report shard is affected, the application reports the pipeline as operational while preserving the actual yellow cluster state in its evidence. Set **Replicas** to `0` under **Settings → ParseDMARC → OpenSearch output** for new report indexes. Existing indexes and OpenSearch-created audit/internal indexes require their own `index.number_of_replicas` setting or an appropriate cluster default. Multi-node clusters should normally retain replicas.
-
-The Report indexes card has **All domains** scope because its patterns query shared cluster indexes, not one selected domain. Each pattern appears on its own line and can be expanded to show the matching physical indexes, health, document count, primary shards, and replicas. An unavailable aggregate or SMTP TLS pattern means OpenSearch has no matching index yet; confirm that the report type is enabled and matching messages reach the mailbox. A missing individual DMARC failure (RUF) index is informational, not an error, because many providers never send these optional reports.
-
-The in-app **Event history** is intentionally limited to state changes detected by MailPosture. Its entries are historical, so a brief failure remains visible after the current status cards show that the service recovered. The standalone Compose file also writes or mounts bounded service logs from MailPosture, OpenSearch, and ParseDMARC. MailPosture exposes only a fixed service list, reads the volumes without write access, limits the number and size of files returned, and redacts common password, token, secret, and authorization labels. This is defense in depth, not a guarantee that logs contain no sensitive metadata. Review logs before sharing them. External deployments leave service-log viewing disabled unless equivalent read-only mounts are configured.
-
-The standalone OpenSearch health check waits for cluster status **yellow** or **green**. A red cluster can still answer its HTTP endpoint, but it is not marked healthy and dependent services do not start until primary shards are available or the health-check retries are exhausted.
-
-Failure reports can contain message headers or content. MailPosture shows counts but intentionally does not display those samples.
-
-### OpenSearch snapshots
-
-The standalone stack mounts `${ROOT}/mailposture/opensearch/snapshots` by default and MailPosture registers it as the `mailposture` file-system repository. Set `OPENSEARCH_SNAPSHOT_PATH` to reuse an existing absolute host path instead. Saving an enabled snapshot schedule creates or updates OpenSearch's native `mailposture` snapshot policy using the configured creation cron, cleanup cron, time zone, age, and count limits.
-
-The snapshot directory is on the same host by default. Copy it to separate storage to protect against host or disk failure.
-
-## 1. Create the local repository
-
-Download and extract the supplied archive, then run:
-
-```bash
-cd /path/to/mailposture
-git init
-git branch -M main
-git add .
-git status
-git commit -m "Add generic MailPosture stack"
-```
-
-The repository contains only examples. You do not need to edit any file before pushing it.
-
-## 2. Push it to GitHub
-
-With GitHub CLI:
-
-```bash
-gh auth login
-gh repo create mailposture --private --source=. --remote=origin --push
-```
-
-Alternatively, create an empty private `mailposture` repository on GitHub. Do not initialize it with extra files, then run:
-
-```bash
-git remote add origin git@github.com:YOUR_GITHUB_USERNAME/mailposture.git
-git push -u origin main
-```
-
-## 3. Let GitHub build the image
-
-The first push to `main` starts **Test and publish container image** under the repository's **Actions** tab. The workflow:
-
-- runs the application tests;
-- builds `linux/amd64` and `linux/arm64` images;
-- publishes `ghcr.io/OWNER/REPOSITORY:latest`;
-- also publishes an immutable `sha-...` tag;
-- publishes version tags when a tag such as `v2.2.0` is pushed.
-
-No registry password is required in the workflow. GitHub's temporary `GITHUB_TOKEN` publishes the image to the repository's GHCR package.
-
-Wait for the workflow to finish successfully before the first Dockhand deployment.
-
-### Public or private image
-
-For the simplest homelab deployment, open the package from the repository's **Packages** section and make the container package public. The source repository can remain private.
-
-To keep the image private, create a GitHub token that can read packages. In Dockhand, open **Settings → Registries** and add:
+The origin path connects to the configured IP while retaining the domain for both SNI and hostname verification:
 
 ```text
-Registry: ghcr.io
-Username: your GitHub username
-Password: a token with read:packages access
+ssl-watch -domain example.com -port 443 -ipaddr 192.0.2.10 -servername example.com -output json -fingerprint
 ```
 
-## 4. Create the Git stack in Dockhand
+TLS verification is not disabled. The app invokes the executable directly with an argument array, never through a shell, and does not accept arbitrary CLI options.
 
-1. Add credentials for the private GitHub repository under **Settings → Git**.
-2. Create a new Git-backed stack and choose the target Docker environment.
-3. Select the repository and the `main` branch.
-4. Set **Compose file path** to `compose.standalone.yml` for a complete deployment, or `docker-compose.yml` when using an existing OpenSearch service.
-5. Set **Context directory** to the repository root (`.` or blank).
-6. Leave **Build images on deploy** disabled; GitHub has already built the image.
-7. Enable **Re-pull images** so Dockhand refreshes the `latest` tag.
-8. Add the variables below in Dockhand's environment-variable panel.
-9. Deploy.
+Public and origin results are cached and stored independently. The dashboard shows the check type, status, expiration, remaining days, issuer, IP used, and check time. Technical details include the common name, subject, SANs, fingerprints, validity dates, chain result, TLS version, cipher, last successful check, and a bounded error message.
 
-### Required Dockhand variables
+Statuses are:
 
-```dotenv
-MAILPOSTURE_IMAGE=ghcr.io/your-github-username/mailposture:latest
-ROOT=/srv/docker-data
-OPENSEARCH_INITIAL_ADMIN_PASSWORD=your-strong-opensearch-password
-```
+| Certificate condition | Display state | Score credit |
+|---|---:|---:|
+| Valid, more than 30 days | Good | 1.00 |
+| Valid, 15–30 days | Needs attention | 0.80 |
+| Valid, 8–14 days | Urgent | 0.55 |
+| Valid, 0–7 days | Critical | 0.25 |
+| Check failed | Check failed | 0.40 |
+| Expired or invalid | Expired / Invalid | 0.00 |
 
-Mark the OpenSearch password as a secret. For the lightweight Compose file, provide the same value as `OPENSEARCH_PASSWORD` instead of `OPENSEARCH_INITIAL_ADMIN_PASSWORD`.
+The warning threshold is configurable from 7 to 365 days. The default is 30 days; 14-day and 7-day milestones remain fixed.
 
-### Optional Dockhand variables
+DNS failures, timeouts, refused connections, invalid JSON, and missing executables become **Check failed** results. An untrusted chain, name mismatch, or not-yet-valid certificate becomes **Invalid** when reported by ssl-watch. Errors are returned as data and do not expose stack traces in the interface.
 
-```dotenv
-TZ=America/Los_Angeles
-OPENSEARCH_URL=http://parsedmarc-opensearch:9200
-OPENSEARCH_INDEX=dmarc_aggregate*
-OPENSEARCH_FAILURE_INDEX=dmarc_failure*,dmarc_forensic*
-OPENSEARCH_SMTP_TLS_INDEX=smtp_tls*
-OPENSEARCH_USERNAME=admin
-OPENSEARCH_VERIFY_TLS=false
-MONITORING_NETWORK=monitoring
-PROXY_NETWORK=proxy
-MAILPOSTURE_DATA_VOLUME=mailposture_data
-OPENSEARCH_VERSION=2
-PARSEDMARC_VERSION=latest
-OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g
-OPENSEARCH_LOG_VOLUME=mailposture_opensearch_logs
-MAILPOSTURE_SETTINGS_PATH=/srv/docker-data/mailposture
-OPENSEARCH_DATA_PATH=/srv/docker-data/parsedmarc/opensearch/data
-OPENSEARCH_SNAPSHOT_PATH=/srv/docker-data/parsedmarc/opensearch/snapshots
-```
+## Domain Score
 
-The Compose files provide defaults for optional values. The three `*_PATH` variables are migration overrides: set them to absolute host paths to reuse MailPosture settings, OpenSearch data, or an existing snapshot repository, and omit them for the new default folders. Do not run snapshot jobs from two OpenSearch clusters against the same repository. The Settings screen can override the OpenSearch URL, username, index patterns, and certificate verification behavior. The password remains an environment secret.
+The previous scoring model gave every displayed posture check equal weight: Healthy, Informational, or Ignored received full credit; Warning received 0.55; and Critical received 0. The score was the average credit scaled to 100.
 
-Use the lowercase owner and repository path shown on the GitHub package page for `MAILPOSTURE_IMAGE`.
+Version 3.0.0 preserves that model. All enabled public and origin certificate paths are consolidated into one `SSL/TLS certificates` component, and that component uses the worst enabled path's credit from the table above. A disabled path has no effect. This makes certificate health meaningful without allowing two certificate paths to overwhelm the existing email controls.
 
-## Versioning
+With ten healthy existing components plus the certificate component, representative scores are:
 
-MailPosture uses semantic versioning:
+| Worst enabled certificate state | Domain Score |
+|---|---:|
+| Good | 100 |
+| 20 days | 98 |
+| 10 days | 96 |
+| 5 days | 93 |
+| Expired or invalid | 91 |
 
-- Bug fixes increment the third number, such as `1.1.2` to `1.1.3`.
-- Features increment the second number and reset the third number to zero, such as `1.2.1` to `1.3.0`.
-- Incompatible changes increment the first number.
+The certificate card shows each enabled path separately so the reason for any score reduction is visible.
 
-This feature release is version `2.2.0`.
+## Scheduling and Check Now
 
-## 5. Reverse proxy
+The existing application refresh scheduler remains authoritative. The default application refresh is every 15 minutes. Certificate results have their own six-hour freshness interval (`360` minutes), so ordinary refreshes reuse stored results until they are due.
 
-The lightweight stack joins the existing external `monitoring` and `proxy` networks. The standalone stack creates its own private `mailposture-backend` network and joins only the existing external `proxy` network. Set `MONITORING_NETWORK` or `PROXY_NETWORK` to use different existing network names without editing the repository.
+**Check Now** on a domain runs every check for that domain and forces all its enabled certificate paths to run immediately. The global refresh action also forces certificate checks. Normal page rendering only reads the current snapshot and never runs ssl-watch synchronously.
 
-Point the reverse proxy at:
+The certificate interval can be changed under **Settings → Monitoring behavior** from 5 minutes to 7 days.
+
+## Discord notifications
+
+Set the webhook only in the deployment environment:
 
 ```text
-http://mailposture:8080
+DOMAINPOSTURE_DISCORD_WEBHOOK=https://discord.com/api/webhooks/...
 ```
 
-Keep authentication at the reverse proxy. MailPosture intentionally does not have a built-in login, and port 8080 is not published to the host.
+The webhook is never saved in settings, returned by the API, placed in HTML, or written to logs. The Settings screen reports only **Configured** or **Not configured**. Only HTTPS Discord webhook hosts and `/api/webhooks/` paths are accepted.
 
-## 6. Local testing
+Notification controls are available in Settings for:
 
-Copy the sample environment file and replace its example values locally:
+- all Discord notifications
+- certificate notifications
+- the certificate warning threshold
+- domain Needs Attention notifications
 
-```bash
-cp .env.example .env
-docker compose config
-docker compose pull
-docker compose up -d
+Notification state is persisted in `/data/domainposture-state.json`. Public and origin paths have independent state. DomainPosture sends one certificate message when a path first crosses the 30-day, 14-day, or 7-day milestone, or becomes expired, invalid, or unavailable. It does not repeat the same state on later scans. A return to a non-actionable state sends one recovery message and resets the milestone sequence for the next certificate.
+
+The existing domain status is reused for domain notifications. A transition from Healthy to Warning or Critical sends one **Domain Needs Attention** message with the score and actionable checks. Remaining in that state does not send duplicates. Returning to Healthy sends one **Domain Recovered** message.
+
+The first observed state establishes a baseline and does not generate an alert storm after an upgrade.
+
+## Installation
+
+### Prepare the environment
+
+Copy the example without committing the resulting secret file:
+
+```sh
+cp env.example .env
 ```
 
-Open MailPosture, select the Settings button, add the monitored domains and their selectors and endpoints, then save. With the standalone stack, also enter the report mailbox and enable snapshots. parsedmarc starts after the first valid mailbox configuration is saved and reloads automatically after later changes. Appearance preference is stored in the browser because it is specific to each device.
+Set at least the image and OpenSearch values appropriate to the selected Compose file. For the standalone stack, set `ROOT`, `OPENSEARCH_PASSWORD`, and `OPENSEARCH_INITIAL_ADMIN_PASSWORD` to deployment-specific values.
 
-`.env` is excluded by `.gitignore`. It must never be committed.
+### Existing report services
 
-For temporary direct browser access, add the following under the service in a local, uncommitted override file:
-
-```yaml
-ports:
-  - "127.0.0.1:8080:8080"
+```sh
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d
 ```
 
-## Updating the application
+This configuration joins the existing external `monitoring` and `proxy` networks. Override `MONITORING_NETWORK` or `PROXY_NETWORK` when those network names differ.
 
-Repository changes are deployed with:
+### Standalone stack
 
-```bash
-git add .
-git commit -m "Update MailPosture"
-git push
+```sh
+docker compose -f compose.standalone.yml pull
+docker compose -f compose.standalone.yml up -d
 ```
 
-Wait for **Test and publish container image** to complete, then manually deploy or sync the stack in Dockhand. Dockhand will pull the refreshed `latest` image; it will not build locally.
+The standalone stack has a private backend network and joins only the external proxy network. Port 8080 is exposed to the Docker networks but is not published to the host. Keep authentication and TLS termination at the reverse proxy; DomainPosture does not include its own login.
 
-### Optional automatic deployment after the image is ready
+After deployment, open Settings, add domains and DKIM selectors, configure optional origin certificates, and save. For the standalone stack, also configure the report mailbox. ParseDMARC reloads automatically when its generated configuration changes.
 
-A normal GitHub push webhook can reach Dockhand before GHCR has finished building the new image. The included workflow can instead call Dockhand only after publishing succeeds.
+## Environment variables
 
-After creating the Dockhand Git stack:
+The web interface manages domains, certificate paths, report history, refresh intervals, notification switches, mailbox options, and most OpenSearch settings. Deployment secrets and storage locations remain environment variables.
 
-1. Configure a webhook secret in that stack and copy its unique webhook URL.
-2. In the GitHub repository, open **Settings → Secrets and variables → Actions**.
-3. Add `DOCKHAND_WEBHOOK_URL` containing the full Dockhand stack webhook URL.
-4. Add `DOCKHAND_WEBHOOK_SECRET` containing the matching secret.
-5. Do not add a separate push webhook for this stack.
+| Variable | Purpose |
+|---|---|
+| `DOMAINPOSTURE_IMAGE` | DomainPosture container image |
+| `DOMAINPOSTURE_DISCORD_WEBHOOK` | Optional Discord webhook secret |
+| `DOMAINPOSTURE_SETTINGS_PATH` | Optional standalone host path mounted at `/data` |
+| `DOMAINPOSTURE_DATA_VOLUME` | Optional Docker volume name for `/data` in the lightweight stack |
+| `OPENSEARCH_URL` | Existing OpenSearch URL |
+| `OPENSEARCH_INDEX` | DMARC aggregate index pattern |
+| `OPENSEARCH_FAILURE_INDEX` | Optional DMARC failure/RUF index patterns |
+| `OPENSEARCH_SMTP_TLS_INDEX` | SMTP TLS report index pattern |
+| `OPENSEARCH_USERNAME` | OpenSearch user |
+| `OPENSEARCH_PASSWORD` | OpenSearch password secret |
+| `OPENSEARCH_VERIFY_TLS` | Verify HTTPS OpenSearch certificates |
+| `OPENSEARCH_INITIAL_ADMIN_PASSWORD` | Standalone OpenSearch administrator secret |
+| `ROOT` | Parent directory for standalone persistent data |
+| `OPENSEARCH_DATA_PATH` | Optional existing OpenSearch data path |
+| `OPENSEARCH_SNAPSHOT_PATH` | Optional existing snapshot repository path |
+| `PROXY_NETWORK` | Existing reverse-proxy Docker network |
+| `MONITORING_NETWORK` | Existing monitoring Docker network for the lightweight stack |
+| `SERVICE_LOGS_ENABLED` | Enable bounded, redacted service-log views when matching read-only mounts exist |
 
-On later pushes, GitHub tests and publishes the image first, then signs a deployment request with HMAC-SHA256 and sends it to Dockhand. If either secret is absent, this step is skipped and manual deployment remains available.
+Runtime overrides used mainly for development are `PORT`, `APP_VERSION`, `SSL_WATCH_PATH`, `DOMAINPOSTURE_SETTINGS_FILE`, `DOMAINPOSTURE_SECRETS_FILE`, `DOMAINPOSTURE_STATE_PATH`, and `PARSEDMARC_CONFIG_PATH`.
 
-## Standalone persistent folders
+Deprecated `MAILPOSTURE_IMAGE`, `MAILPOSTURE_DISCORD_WEBHOOK`, `MAILPOSTURE_SETTINGS_PATH`, `MAILPOSTURE_DATA_VOLUME`, `MAILPOSTURE_DEPLOYMENT_MODE`, and `MAILPOSTURE_LOG_PATH` remain accepted as fallbacks. Prefer the `DOMAINPOSTURE_` names for new deployments.
 
-Create these folders before the first standalone deployment and grant the container users access appropriate to your Docker host:
+## Upgrading from MailPosture
 
-```text
-${ROOT}/mailposture/
-├── settings/
-│   ├── settings.json
-│   ├── secrets.json
-│   └── parsedmarc/config.ini
-└── opensearch/
-    ├── data/
-    └── snapshots/
-```
+1. Back up the existing `/data` volume or `${ROOT}/mailposture` directory and the OpenSearch snapshot repository.
+2. Do not delete or recreate Docker volumes, OpenSearch data, or the report mailbox.
+3. Pull or build the DomainPosture 3.0.0 image.
+4. Keep the existing `mailposture_data` volume or legacy host path during the first upgrade. The supplied Compose defaults do this automatically.
+5. Replace product-specific environment variables with their `DOMAINPOSTURE_` equivalents when convenient; the old names remain fallbacks.
+6. Start the updated stack and confirm `/healthz`, **System Status**, the saved domain list, report counts, and a manual certificate check.
+7. Configure origin certificate paths only after confirming their intended IP addresses.
 
-Do not place this mutable data inside Dockhand's Git checkout. Do not commit `settings.json`, `secrets.json`, `config.ini`, OpenSearch data, or snapshots.
+Settings are normalized from schema 7 to schema 8 when loaded. Existing domain and report settings are preserved. Every existing domain receives public certificate monitoring enabled and origin monitoring disabled unless certificate settings already exist. Saving Settings writes the normalized schema atomically. The new operational state file is additive and does not replace prior settings or report data.
 
-To keep the data from the stack shown in this guide without copying it, set these Dockhand variables to the actual absolute paths represented by your current `${ROOT}` value:
+The Compose project and service keys, default standalone paths, snapshot repository name, internal ParseDMARC runtime path, internal OpenSearch policy name, compatibility network aliases, and named diagnostic volumes still contain `mailposture`. They are deliberately retained so Compose can recreate the existing service in place and reuse its data. The container name, primary network alias, user-facing branding, preferred environment variables, package metadata, and new files use DomainPosture.
 
-```dotenv
-MAILPOSTURE_SETTINGS_PATH=/your/current/root/mailposture
-OPENSEARCH_DATA_PATH=/your/current/root/parsedmarc/opensearch/data
-OPENSEARCH_SNAPSHOT_PATH=/your/current/root/parsedmarc/opensearch/snapshots
-```
+Rollback is to stop the 3.0.0 containers and restart the prior image against the untouched volume backup. The prior release ignores the additive certificate and notification fields, but restoring the pre-upgrade settings backup is the safest rollback.
 
-Stop the old parsedmarc and OpenSearch services before starting the standalone stack against those paths. A data directory or snapshot repository must never be opened concurrently by two OpenSearch containers.
+## Data and privacy
 
-## Verification
+- `/data/settings.json` stores application configuration.
+- `/data/secrets.json` stores the report-mailbox password with restrictive file permissions.
+- `/data/domainposture-state.json` stores certificate cache and notification transition state.
+- ParseDMARC writes normalized reports to OpenSearch and controls mailbox archive/delete behavior.
+- DomainPosture shows RUF counts but intentionally does not display potentially sensitive report samples.
+- SMTP relay probes use reserved example addresses, stop before `DATA`, and never send message content.
+- BIMI SVGs are validated and served through a sandboxed same-origin response.
+- Service log views use a fixed service list, bounded reads, and redaction as defense in depth. Review logs before sharing them.
 
-```bash
+The application writes settings, operational state, generated ParseDMARC configuration, logs when enabled, and OpenSearch snapshot policy configuration. It does not modify DNS. The container uses a read-only root filesystem, drops Linux capabilities, has no Docker socket, and uses `/data` as its writable application mount.
+
+## Health and troubleshooting
+
+`GET /healthz` returns the application version and process health. **System Status** checks storage, the ssl-watch executable, OpenSearch, report indexes, generated ParseDMARC configuration, and the collector heartbeat.
+
+If a certificate check fails:
+
+1. Open **System Status** and confirm `/usr/local/bin/ssl-watch` is available.
+2. Confirm the container has outbound TCP access to port 443 and a current CA trust store.
+3. For a public check, verify the domain resolves from inside the container.
+4. For an origin check, verify the IP is correct and accepts TLS on 443 for the configured SNI name.
+5. Do not disable verification to hide a chain or hostname problem.
+6. Select **Check Now** after correcting the issue.
+
+If Discord is not sending messages, confirm the environment secret uses an HTTPS Discord webhook URL, the Settings page says **Configured**, notification switches are enabled, and the container can reach Discord. Existing actionable states do not alert immediately after an upgrade because the first scan establishes the deduplication baseline.
+
+## Development and verification
+
+```sh
 npm test
+node --check server.js
+node --check ssl-monitor.js
+node --check public/app.js
 ```
 
-MailPosture never writes to DNS or mailboxes. In standalone mode it writes its own settings, secrets, and generated parsedmarc configuration, and it manages the OpenSearch snapshot repository and policy. Its root filesystem remains read-only, `/data` is the only writable application mount, and the container has no Linux capabilities or Docker socket access.
+The test suite covers settings migration, public/origin argument construction, input rejection, JSON normalization, distinct cached paths, status thresholds, score contribution, forced and scheduled-cache behavior, notification milestones, deduplication, recovery, UI wiring, and existing email posture behavior.
+
+The integration follows the current upstream [ssl-watch documentation](https://github.com/idesyatov/ssl-watch) and pins version 1.17.2. Its MIT attribution is retained in `THIRD_PARTY_NOTICES.md`. The project uses semantic versioning; this DomainPosture feature release is `3.0.0`.
+
+## Repository rename
+
+The repository was renamed in place from `TechJedi51/mailposture` to `TechJedi51/domainposture`. GitHub redirects the former repository URL, but existing local clones should update their `origin` URL explicitly. The image workflow derives its GHCR name from the repository slug, so future releases publish `ghcr.io/techjedi51/domainposture`.
