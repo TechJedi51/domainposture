@@ -234,3 +234,6 @@ html[data-theme="light"] .certificate-days{opacity:.09}
 .section-settings{display:grid;gap:14px;padding-top:4px}
 .section-settings[hidden]{display:none!important}
 @media(max-width:720px){.certificate-results,.certificate-result dl{grid-template-columns:1fr}.certificate-actions{align-items:stretch;flex-direction:column}.certificate-actions button{width:100%}}
+
+/* Managed secrets key setup */
+.key-setup button{width:max-content;min-height:44px;padding:10px 16px;border:1px solid var(--brand-blue);border-radius:9px;background:var(--brand-blue);color:#fff;font-weight:750;cursor:pointer}.key-setup button[hidden]{display:none}.key-security-note{margin:0;color:var(--muted);font-size:12px;line-height:1.5}.recovery-key-content{padding:30px}.recovery-key-content>p{color:var(--muted);line-height:1.55}.recovery-key-dialog textarea{min-height:84px;resize:none;font:14px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}.recovery-key-dialog #copy-secrets-key-status{min-height:18px;margin:12px 0 0;font-size:12px;color:var(--green)}

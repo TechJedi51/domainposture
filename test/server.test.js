@@ -1,5 +1,5 @@
 'use strict';
-const assert=require('assert'),fs=require('fs'),net=require('net');
+const assert=require('assert'),fs=require('fs'),net=require('net'),os=require('os'),path=require('path');
 const app=require('../server');
 const sslMonitor=require('../ssl-monitor');
 async function run(){
@@ -40,6 +40,25 @@ async function run(){
   assert.throws(()=>app.decryptSecrets(encryptedSecrets,Buffer.alloc(32,8)),/original key/);
   assert.deepStrictEqual(app.decodeSecretsKey(secretsKey.toString('base64')),secretsKey);
   assert.throws(()=>app.decodeSecretsKey('too-short'),/exactly 32 bytes/);
+  const keyTestDirectory=fs.mkdtempSync(path.join(os.tmpdir(),'domainposture-key-'));
+  try {
+    const managedKeyPath=path.join(keyTestDirectory,'.domainposture-secrets-key');
+    const managedSecretsPath=path.join(keyTestDirectory,'secrets.json');
+    fs.writeFileSync(managedSecretsPath,JSON.stringify({imap_password:'legacy-private'}),{mode:0o600});
+    const generated=await app.createManagedSecretsKey({keyPath:managedKeyPath,secretsPath:managedSecretsPath,current:{key:null,source:null}});
+    const generatedKey=app.decodeSecretsKey(generated.key);
+    assert.strictEqual(generatedKey.length,32);
+    assert.strictEqual(generated.source,'managed');
+    assert.strictEqual(generated.migrated_legacy_secrets,true);
+    assert.strictEqual(fs.statSync(managedKeyPath).mode&0o777,0o600);
+    const migratedSecrets=JSON.parse(fs.readFileSync(managedSecretsPath,'utf8'));
+    assert.strictEqual(app.encryptedSecretsDocument(migratedSecrets),true);
+    assert.deepStrictEqual(app.decryptSecrets(migratedSecrets,generatedKey),{imap_password:'legacy-private'});
+    await assert.rejects(()=>app.createManagedSecretsKey({keyPath:managedKeyPath,secretsPath:managedSecretsPath,current:{key:generatedKey,source:'managed'}}),/already configured/);
+    await assert.rejects(()=>app.createManagedSecretsKey({keyPath:path.join(keyTestDirectory,'replacement-key'),secretsPath:managedSecretsPath,current:{key:null,source:null}}),/Restore the original key/);
+  } finally {
+    fs.rmSync(keyTestDirectory,{recursive:true,force:true});
+  }
   const originSettings=app.normalizeSettings({monitored_domains:['example.com'],certificate_checks:{'example.com':{check_public:true,check_origin:true,origin_ip:'2001:db8::10'}}});
   assert.deepStrictEqual(originSettings.certificate_checks['example.com'],{check_public:true,check_origin:true,origin_ip:'2001:db8::10'});
   assert.throws(()=>app.normalizeSettings({monitored_domains:['example.com'],certificate_checks:{'example.com':{check_public:false,check_origin:false}}}),/at least one certificate check/i);
@@ -326,7 +345,7 @@ async function run(){
   assert.strictEqual(shards.affected_report_shards,0);
   assert.strictEqual(shards.groups.find(group=>group.category==='OpenSearch security audit logs').unassigned_shards,1);
   process.env.DEMO_MODE='true';const status=await app.refresh();assert.strictEqual(status.domains.length,1);assert.ok(status.summary.critical>0);assert.strictEqual(status.version,require('../package.json').version);assert.strictEqual(status.domains[0].mail_profile.provider,'self_hosted');
-  assert.strictEqual(require('../package.json').version,'3.1.0');
+  assert.strictEqual(require('../package.json').version,'3.1.1');
   const page=fs.readFileSync('public/index.html','utf8'),client=fs.readFileSync('public/app.js','utf8'),styles=fs.readFileSync('public/settings.css','utf8'),icon=fs.readFileSync('public/domainposture.svg','utf8'),standalone=fs.readFileSync('compose.standalone.yml','utf8'),dockerfile=fs.readFileSync('Dockerfile','utf8'),smtpSource=fs.readFileSync('smtp.js','utf8');
   assert.match(page,/DomainPosture/);
   assert.match(page,/id="dashboard-view"/);
@@ -336,7 +355,7 @@ async function run(){
   assert.match(page,/id="log-service"/);
   assert.match(page,/id="service-log"/);
   assert.match(page,/id="service-log-service"/);
-  assert.match(page,/v3\.1\.0/);
+  assert.match(page,/v3\.1\.1/);
   assert.match(page,/Domain Health Dashboard/);
   assert.doesNotMatch(page,/DMARC authentication and SMTP TLS delivery results for the selected history window/);
   assert.match(page,/id="domain-menu-button"/);
@@ -441,7 +460,7 @@ async function run(){
   assert.match(standalone,/DOMAINPOSTURE_SETTINGS_PATH/);
   assert.match(standalone,/MAILPOSTURE_SETTINGS_PATH/);
   assert.match(standalone,/DOMAINPOSTURE_DISCORD_WEBHOOK/);
-  assert.match(standalone,/domainposture_secrets_key/);
+  assert.doesNotMatch(standalone,/domainposture_secrets_key/);
   assert.match(standalone,/OPENSEARCH_DATA_PATH/);
   assert.match(standalone,/OPENSEARCH_SNAPSHOT_PATH/);
   assert.match(standalone,/type: bind/);
@@ -460,7 +479,7 @@ async function run(){
   assert.match(dockerfile,/dns-security\.js/);
   assert.match(dockerfile,/ssl-monitor\.js/);
   assert.match(dockerfile,/ghcr\.io\/idesyatov\/ssl-watch:v\$\{SSL_WATCH_VERSION\}/);
-  assert.match(dockerfile,/org\.opencontainers\.image\.version="3\.1\.0"/);
+  assert.match(dockerfile,/org\.opencontainers\.image\.version="3\.1\.1"/);
   assert.match(smtpSource,/RCPT TO:<probe@example\.net>/);
   assert.doesNotMatch(smtpSource,/command\(['"]DATA/);
   assert.match(smtpSource,/policyBlock/);
@@ -486,6 +505,10 @@ async function run(){
   assert.match(styles,/\.state\.ignored/);
   assert.match(styles,/Standard on\/off switch/);
   assert.match(styles,/translateX\(20px\)/);
+  assert.match(page,/id="create-secrets-key"/);
+  assert.match(page,/This key will not be shown again/);
+  assert.match(client,/\/api\/secrets-key/);
+  assert.match(client,/navigator\.clipboard\.writeText/);
   assert.match(styles,/--review:#ffd60a/i);
   assert.match(icon,/<svg/);
   assert.match(icon,/check mark/i);

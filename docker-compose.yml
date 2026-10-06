@@ -9,7 +9,6 @@ services:
     environment:
       TZ: ${TZ:-UTC}
       DOMAINPOSTURE_DEPLOYMENT_MODE: external
-      DOMAINPOSTURE_SECRETS_KEY_FILE: /run/secrets/domainposture_secrets_key
       DOMAINPOSTURE_DISCORD_WEBHOOK: ${DOMAINPOSTURE_DISCORD_WEBHOOK:-${MAILPOSTURE_DISCORD_WEBHOOK:-}}
       OPENSEARCH_URL: ${OPENSEARCH_URL:-http://parsedmarc-opensearch:9200}
       OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-dmarc_aggregate*}
@@ -19,8 +18,6 @@ services:
       OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD:-}
       OPENSEARCH_VERIFY_TLS: ${OPENSEARCH_VERIFY_TLS:-false}
       SERVICE_LOGS_ENABLED: ${SERVICE_LOGS_ENABLED:-false}
-    secrets:
-      - domainposture_secrets_key
     volumes:
       - mailposture_data:/data:rw
     expose:
@@ -45,10 +42,6 @@ services:
 volumes:
   mailposture_data:
     name: ${DOMAINPOSTURE_DATA_VOLUME:-${MAILPOSTURE_DATA_VOLUME:-mailposture_data}}
-
-secrets:
-  domainposture_secrets_key:
-    file: ${DOMAINPOSTURE_SECRETS_KEY_PATH:?Set DOMAINPOSTURE_SECRETS_KEY_PATH to a file containing a 32-byte base64 or hexadecimal key}
 
 networks:
   monitoring:

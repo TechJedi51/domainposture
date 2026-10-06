@@ -4,7 +4,7 @@ FROM ghcr.io/idesyatov/ssl-watch:v${SSL_WATCH_VERSION} AS sslwatch
 FROM node:22-alpine
 ARG SSL_WATCH_VERSION=1.17.2
 LABEL org.opencontainers.image.title="DomainPosture" \
-      org.opencontainers.image.version="3.1.0" \
+      org.opencontainers.image.version="3.1.1" \
       org.opencontainers.image.description="Domain, email, and certificate health monitoring" \
       org.opencontainers.image.source="https://github.com/TechJedi51/domainposture" \
       org.opencontainers.image.ssl-watch.version="${SSL_WATCH_VERSION}"

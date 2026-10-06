@@ -12,7 +12,6 @@ services:
     environment:
       TZ: ${TZ:-UTC}
       DOMAINPOSTURE_DEPLOYMENT_MODE: standalone
-      DOMAINPOSTURE_SECRETS_KEY_FILE: /run/secrets/domainposture_secrets_key
       DOMAINPOSTURE_DISCORD_WEBHOOK: ${DOMAINPOSTURE_DISCORD_WEBHOOK:-${MAILPOSTURE_DISCORD_WEBHOOK:-}}
       OPENSEARCH_URL: http://parsedmarc-opensearch:9200
       OPENSEARCH_INDEX: ${OPENSEARCH_INDEX:-dmarc_aggregate*}
@@ -22,8 +21,6 @@ services:
       OPENSEARCH_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD:?Set the OpenSearch administrator password}
       OPENSEARCH_VERIFY_TLS: "false"
       SERVICE_LOGS_ENABLED: "true"
-    secrets:
-      - domainposture_secrets_key
     volumes:
       - type: bind
         source: ${DOMAINPOSTURE_SETTINGS_PATH:-${MAILPOSTURE_SETTINGS_PATH:-${ROOT:?Set ROOT to the parent directory for persistent application data}/mailposture/settings}}
@@ -201,10 +198,6 @@ volumes:
     name: ${PARSEDMARC_STATUS_VOLUME:-mailposture_parsedmarc_status}
   opensearch_logs:
     name: ${OPENSEARCH_LOG_VOLUME:-mailposture_opensearch_logs}
-
-secrets:
-  domainposture_secrets_key:
-    file: ${DOMAINPOSTURE_SECRETS_KEY_PATH:?Set DOMAINPOSTURE_SECRETS_KEY_PATH to a file containing a 32-byte base64 or hexadecimal key}
 
 networks:
   backend:

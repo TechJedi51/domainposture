@@ -446,11 +446,26 @@ function renderSettingsDomains() {
   }).join('') : '<div class="empty-list"><p>No domains are configured.</p><button type="button" data-add-domain>Add a domain</button></div>';
 }
 
+function renderSecretsKeySettings(settings = state.settings) {
+  const key = settings?.secrets_key || {};
+  const button = $('#create-secrets-key');
+  $('#secrets-key-status').className = 'settings-note';
+  if (key.configured) {
+    const source = key.source === 'managed' ? 'DomainPosture' : key.source === 'external' ? 'an external Docker secret' : 'the deployment environment';
+    $('#secrets-key-status').textContent = `An encryption key is configured and provided by ${source}.`;
+    button.hidden = true;
+  } else {
+    $('#secrets-key-status').textContent = 'No encryption key is configured. Create one before saving a Discord webhook or report-mailbox password.';
+    button.hidden = !key.can_generate;
+  }
+}
+
 async function loadSettings() {
   const response = await fetch('/api/settings', { cache: 'no-store' });
   const settings = await response.json();
   if (!response.ok) throw new Error(settings.error || 'Unable to load settings');
   state.settings = clone(settings);
+  renderSecretsKeySettings(settings);
   $('#report-days').value = settings.report_days;
   $('#refresh-minutes').value = settings.refresh_minutes;
   $('#certificate-check-minutes').value = settings.certificate_check_minutes;
@@ -895,6 +910,7 @@ async function saveSettings(event) {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Unable to save settings');
     state.settings = clone(result);
+    renderSecretsKeySettings(result);
     $('#discord-webhook').value = '';
     $('#discord-webhook-clear').checked = false;
     $('#discord-webhook-clear').disabled = result.notifications.discord_webhook_source !== 'settings';
@@ -970,6 +986,47 @@ $('#refresh').onclick = async () => {
 $('#settings-form').addEventListener('submit', saveSettings);
 $('#domain-form').addEventListener('submit', saveDomain);
 document.querySelectorAll('input[type="checkbox"]').forEach(input => input.setAttribute('role', 'switch'));
+$('#create-secrets-key').onclick = async () => {
+  const button = $('#create-secrets-key');
+  button.disabled = true;
+  button.textContent = 'Creating…';
+  try {
+    const response = await fetch('/api/secrets-key', { method: 'POST' });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Unable to create the encryption key.');
+    state.settings.secrets_key = { configured: true, source: result.source, can_generate: false };
+    renderSecretsKeySettings();
+    $('#generated-secrets-key').value = result.key;
+    $('#copy-secrets-key-status').textContent = '';
+    $('#secrets-key-dialog').showModal();
+    $('#copy-secrets-key').focus();
+  } catch (error) {
+    $('#secrets-key-status').textContent = error.message;
+    $('#secrets-key-status').className = 'settings-note failure';
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Create encryption key';
+  }
+};
+$('#copy-secrets-key').onclick = async () => {
+  const field = $('#generated-secrets-key');
+  try {
+    await navigator.clipboard.writeText(field.value);
+    $('#copy-secrets-key-status').textContent = 'Key copied. Save it in your password manager before continuing.';
+  } catch (_) {
+    field.select();
+    $('#copy-secrets-key-status').textContent = 'Copy was unavailable. The key is selected so you can copy it manually.';
+  }
+};
+$('#close-secrets-key').onclick = () => {
+  $('#secrets-key-dialog').close();
+  $('#generated-secrets-key').value = '';
+  $('#copy-secrets-key-status').textContent = '';
+};
+$('#secrets-key-dialog').addEventListener('cancel', event => {
+  event.preventDefault();
+  $('#copy-secrets-key-status').textContent = 'Save the key, then choose “I saved it securely.”';
+});
 $('#add-domain').onclick = () => openDomainEditor();
 $('#selector-add').onclick = addSelector;
 $('#endpoint-add').onclick = addEndpoint;
