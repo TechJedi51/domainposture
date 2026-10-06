@@ -1,6 +1,6 @@
 # DomainPosture
 
-DomainPosture 3.0.0 is a focused domain-health dashboard. It combines the existing email posture checks and report analysis with public and origin SSL/TLS certificate monitoring. Add a domain, keep public certificate monitoring enabled, optionally add an origin IP, and DomainPosture schedules and explains the checks.
+DomainPosture 3.1.0 is a focused domain-health dashboard. It combines email posture checks and report analysis with public and origin SSL/TLS certificate monitoring. Each domain can enable only the review sections that apply to it, and the Domain Score includes only checks from enabled sections.
 
 The application evolved in place from MailPosture. Existing domains, settings, report data, ParseDMARC configuration, OpenSearch data, snapshots, and Docker volumes remain usable. Some legacy internal names are intentionally retained where renaming them would risk data loss; see [Upgrading from MailPosture](#upgrading-from-mailposture).
 
@@ -18,7 +18,7 @@ The dashboard translates those checks into **Healthy**, **Needs Attention**, and
 
 ## Architecture
 
-DomainPosture remains a small Node.js service with a static browser interface. Settings and operational state are JSON files under `/data`; there is no SQL database. ParseDMARC and OpenSearch remain separate services.
+DomainPosture remains a small Node.js service with a static browser interface. Settings and operational state are JSON files under `/data`; there is no SQL database. ParseDMARC and OpenSearch remain separate services. This is intentional: each service has a different lifecycle, data boundary, health check, and update schedule. Bundling them into the DomainPosture image would couple upgrades, enlarge the application container, and make database recovery or rollback harder. The standalone Compose file keeps the services together as one deployable stack while retaining the official [OpenSearch Docker deployment](https://docs.opensearch.org/latest/install-and-configure/install-opensearch/docker/) and [ParseDMARC image](https://domainaware.github.io/parsedmarc/installation.html) as separate containers.
 
 Two Compose configurations are included:
 
@@ -31,11 +31,12 @@ The container includes `ssl-watch` v1.17.2 as `/usr/local/bin/ssl-watch`. It is 
 
 Each domain has these settings in the existing Add/Edit Domain dialog:
 
+- **Domain certificates** section switch — controls whether certificates contribute to the score
 - **Check Public Certificate** — enabled by default
 - **Check Origin Certificate** — disabled by default
 - **Origin IP** — shown and required only when origin checking is enabled
 
-At least one certificate path must be enabled. Domain names and IPv4/IPv6 addresses are validated in the browser and again on the server.
+At least one certificate path must be enabled while the Domain certificates section is on. Domain names and IPv4/IPv6 addresses are validated in the browser and again on the server.
 
 ### Public and origin checks
 
@@ -74,7 +75,9 @@ DNS failures, timeouts, refused connections, invalid JSON, and missing executabl
 
 The previous scoring model gave every displayed posture check equal weight: Healthy, Informational, or Ignored received full credit; Warning received 0.55; and Critical received 0. The score was the average credit scaled to 100.
 
-Version 3.0.0 preserves that model. All enabled public and origin certificate paths are consolidated into one `SSL/TLS certificates` component, and that component uses the worst enabled path's credit from the table above. A disabled path has no effect. This makes certificate health meaningful without allowing two certificate paths to overwhelm the existing email controls.
+Version 3.1.0 keeps equal weighting among enabled components and adds six independent per-domain sections: Domain certificates, Additional TLS endpoints, Mail hosting and SMTP probes, DKIM selectors, Mail security review exceptions, and BIMI review exceptions. A disabled section runs no checks and contributes nothing to the score. Existing domains migrate with all six sections enabled, preserving their prior checks and score inputs.
+
+All enabled public and origin certificate paths are consolidated into one `SSL/TLS certificates` component, and that component uses the worst enabled path's credit from the table above. A disabled certificate path has no effect. If Domain certificates is the only enabled section, that certificate component is the entire score. BIMI and missing-MTA-STS ignore exceptions keep their existing full-credit weighting while their sections are enabled.
 
 With ten healthy existing components plus the certificate component, representative scores are:
 
@@ -98,7 +101,9 @@ The certificate interval can be changed under **Settings → Monitoring behavior
 
 ## Discord notifications
 
-Enter the webhook under **Settings → Monitored domains → Discord notifications**. DomainPosture stores it in `/data/secrets.json` with the report-mailbox password and never returns its value to the browser. Leave the field blank to keep the current value, or select **Remove the webhook saved in DomainPosture** to delete it.
+Enter the webhook under **Settings → Monitored domains → Discord notifications**. DomainPosture stores it with the report-mailbox password in an authenticated AES-256-GCM envelope at `/data/secrets.json` and never returns its value to the browser. Leave the field blank to keep the current value, or select **Remove the webhook saved in DomainPosture** to delete it.
+
+The encryption key is supplied as a [Docker Compose secret](https://docs.docker.com/compose/how-tos/use-secrets/) and mounted at `/run/secrets/domainposture_secrets_key`. Generate it once with `openssl rand -base64 32`, restrict the host key file so container user ID 1000 can read it, and back it up separately from `/data`. File-backed Compose secrets use a bind mount, so host ownership and permissions apply. Do not replace the key while encrypted secrets exist. Version 3.1.0 can read a legacy plaintext secrets file; after the key is configured, the next Settings save migrates that file to encrypted storage.
 
 For deployments that manage secrets outside the application, the environment variable remains supported as a fallback:
 
@@ -145,6 +150,10 @@ This configuration joins the existing external `monitoring` and `proxy` networks
 ### Standalone stack
 
 ```sh
+install -d -m 700 /srv/docker-secrets
+openssl rand -base64 32 > /srv/docker-secrets/domainposture-secrets-key
+chown 1000:1000 /srv/docker-secrets/domainposture-secrets-key
+chmod 400 /srv/docker-secrets/domainposture-secrets-key
 docker compose -f compose.standalone.yml pull
 docker compose -f compose.standalone.yml up -d
 ```
@@ -160,6 +169,8 @@ The web interface manages domains, certificate paths, report history, refresh in
 | Variable | Purpose |
 |---|---|
 | `DOMAINPOSTURE_IMAGE` | DomainPosture container image |
+| `DOMAINPOSTURE_SECRETS_KEY_PATH` | Required host path to the persistent 32-byte encryption key file used by Compose |
+| `DOMAINPOSTURE_SECRETS_KEY_FILE` | Container path to the mounted encryption key; defaults to `/run/secrets/domainposture_secrets_key` |
 | `DOMAINPOSTURE_DISCORD_WEBHOOK` | Optional Discord webhook fallback when none is saved in Settings |
 | `DOMAINPOSTURE_SETTINGS_PATH` | Optional standalone host path mounted at `/data` |
 | `DOMAINPOSTURE_DATA_VOLUME` | Optional Docker volume name for `/data` in the lightweight stack |
@@ -177,6 +188,8 @@ The web interface manages domains, certificate paths, report history, refresh in
 | `PROXY_NETWORK` | Existing reverse-proxy Docker network |
 | `MONITORING_NETWORK` | Existing monitoring Docker network for the lightweight stack |
 | `SERVICE_LOGS_ENABLED` | Enable bounded, redacted service-log views when matching read-only mounts exist |
+| `OPENSEARCH_VERSION` | Standalone OpenSearch image tag; pin an explicit tested version for controlled updates |
+| `PARSEDMARC_VERSION` | Standalone ParseDMARC image tag; pin an explicit tested version for controlled updates |
 
 Runtime overrides used mainly for development are `PORT`, `APP_VERSION`, `SSL_WATCH_PATH`, `DOMAINPOSTURE_SETTINGS_FILE`, `DOMAINPOSTURE_SECRETS_FILE`, `DOMAINPOSTURE_STATE_PATH`, and `PARSEDMARC_CONFIG_PATH`.
 
@@ -186,22 +199,24 @@ Deprecated `MAILPOSTURE_IMAGE`, `MAILPOSTURE_DISCORD_WEBHOOK`, `MAILPOSTURE_SETT
 
 1. Back up the existing `/data` volume or `${ROOT}/mailposture` directory and the OpenSearch snapshot repository.
 2. Do not delete or recreate Docker volumes, OpenSearch data, or the report mailbox.
-3. Pull or build the DomainPosture 3.0.0 image.
-4. Keep the existing `mailposture_data` volume or legacy host path during the first upgrade. The supplied Compose defaults do this automatically.
-5. Replace product-specific environment variables with their `DOMAINPOSTURE_` equivalents when convenient; the old names remain fallbacks.
-6. Start the updated stack and confirm `/healthz`, **System Status**, the saved domain list, report counts, and a manual certificate check.
-7. Configure origin certificate paths only after confirming their intended IP addresses.
+3. Create and back up the secrets encryption key, then set `DOMAINPOSTURE_SECRETS_KEY_PATH` to its host path.
+4. Pull or build the DomainPosture 3.1.0 image.
+5. Keep the existing `mailposture_data` volume or legacy host path during the first upgrade. The supplied Compose defaults do this automatically.
+6. Replace product-specific environment variables with their `DOMAINPOSTURE_` equivalents when convenient; the old names remain fallbacks.
+7. Start the updated stack, save Settings once to encrypt any legacy secrets, and confirm `/healthz`, **System Status**, the saved domain list, report counts, and a manual certificate check.
+8. Configure origin certificate paths only after confirming their intended IP addresses.
 
-Settings are normalized from schema 7 to schema 8 when loaded. Existing domain and report settings are preserved. Every existing domain receives public certificate monitoring enabled and origin monitoring disabled unless certificate settings already exist. Saving Settings writes the normalized schema atomically. The new operational state file is additive and does not replace prior settings or report data.
+Settings are normalized to schema 9 when loaded. Existing domain and report settings are preserved. Every existing domain receives all six check sections enabled, public certificate monitoring enabled, and origin monitoring disabled unless those settings already exist. Saving Settings writes the normalized schema atomically.
 
 The Compose project and service keys, default standalone paths, snapshot repository name, internal ParseDMARC runtime path, internal OpenSearch policy name, compatibility network aliases, and named diagnostic volumes still contain `mailposture`. They are deliberately retained so Compose can recreate the existing service in place and reuse its data. The container name, primary network alias, user-facing branding, preferred environment variables, package metadata, and new files use DomainPosture.
 
-Rollback is to stop the 3.0.0 containers and restart the prior image against the untouched volume backup. The prior release ignores the additive certificate and notification fields, but restoring the pre-upgrade settings backup is the safest rollback.
+Rollback is to stop the 3.1.0 containers, restore the pre-upgrade `/data` backup, and restart the prior image. Preserve the 3.1 encryption key even after rollback so encrypted secrets can be recovered later.
 
 ## Data and privacy
 
 - `/data/settings.json` stores application configuration.
-- `/data/secrets.json` stores the report-mailbox password and optional Discord webhook with restrictive file permissions.
+- `/data/secrets.json` stores the report-mailbox password and optional Discord webhook in an AES-256-GCM authenticated-encryption envelope with restrictive file permissions.
+- `/run/secrets/domainposture_secrets_key` supplies the separate encryption key at runtime; it is not stored in `/data` or the image.
 - `/data/domainposture-state.json` stores certificate cache and notification transition state.
 - ParseDMARC writes normalized reports to OpenSearch and controls mailbox archive/delete behavior.
 - DomainPosture shows RUF counts but intentionally does not display potentially sensitive report samples.
@@ -213,7 +228,7 @@ The application writes settings, operational state, generated ParseDMARC configu
 
 ## Health and troubleshooting
 
-`GET /healthz` returns the application version and process health. **System Status** checks storage, the ssl-watch executable, OpenSearch, report indexes, generated ParseDMARC configuration, and the collector heartbeat.
+`GET /healthz` returns the application version and process health. **System Status** checks storage, encrypted secret availability, the ssl-watch executable, OpenSearch, report indexes, generated ParseDMARC configuration, and the collector heartbeat.
 
 If a certificate check fails:
 
@@ -235,9 +250,9 @@ node --check ssl-monitor.js
 node --check public/app.js
 ```
 
-The test suite covers settings migration, public/origin argument construction, input rejection, JSON normalization, distinct cached paths, status thresholds, score contribution, forced and scheduled-cache behavior, Discord webhook validation and precedence, notification milestones, deduplication, recovery, UI wiring, and existing email posture behavior.
+The test suite covers settings migration, section-controlled scoring, public/origin argument construction, encrypted secret round trips and authentication failure, input rejection, JSON normalization, distinct cached paths, status thresholds, forced and scheduled-cache behavior, Discord webhook validation and precedence, notification milestones, deduplication, recovery, UI wiring, and existing email posture behavior.
 
-The integration follows the current upstream [ssl-watch documentation](https://github.com/idesyatov/ssl-watch) and pins version 1.17.2. Its MIT attribution is retained in `THIRD_PARTY_NOTICES.md`. The project uses semantic versioning; this DomainPosture feature release is `3.0.0`.
+The integration follows the current upstream [ssl-watch documentation](https://github.com/idesyatov/ssl-watch) and pins version 1.17.2. Its MIT attribution is retained in `THIRD_PARTY_NOTICES.md`. The project uses semantic versioning; this DomainPosture feature release is `3.1.0`.
 
 ## Repository rename
 

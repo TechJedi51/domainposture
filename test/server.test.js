@@ -16,7 +16,8 @@ async function run(){
   assert.deepStrictEqual(settings.monitored_domains,['example.com']);
   assert.strictEqual(settings.opensearch_enabled,true);
   assert.strictEqual(settings.report_source,'standalone');
-  assert.strictEqual(settings.schema_version,8);
+  assert.strictEqual(settings.schema_version,9);
+  assert.deepStrictEqual(settings.check_sections['example.com'],{domain_certificates:true,additional_tls:true,smtp:true,dkim:true,mail_security:true,bimi:true});
   assert.deepStrictEqual(settings.certificate_checks['example.com'],{check_public:true,check_origin:false,origin_ip:''});
   assert.strictEqual(settings.certificate_check_minutes,360);
   assert.strictEqual(settings.notifications.ssl_warning_threshold,30);
@@ -31,9 +32,22 @@ async function run(){
   assert.strictEqual(savedDiscord.source,'settings');
   assert.strictEqual(savedDiscord.url.toString(),discordUrl);
   delete process.env.DOMAINPOSTURE_DISCORD_WEBHOOK;
+  const secretsKey=Buffer.alloc(32,7);
+  const encryptedSecrets=app.encryptSecrets({discord_webhook:discordUrl,imap_password:'private'},secretsKey);
+  assert.strictEqual(app.encryptedSecretsDocument(encryptedSecrets),true);
+  assert.doesNotMatch(JSON.stringify(encryptedSecrets),/private|discord\.com/);
+  assert.deepStrictEqual(app.decryptSecrets(encryptedSecrets,secretsKey),{discord_webhook:discordUrl,imap_password:'private'});
+  assert.throws(()=>app.decryptSecrets(encryptedSecrets,Buffer.alloc(32,8)),/original key/);
+  assert.deepStrictEqual(app.decodeSecretsKey(secretsKey.toString('base64')),secretsKey);
+  assert.throws(()=>app.decodeSecretsKey('too-short'),/exactly 32 bytes/);
   const originSettings=app.normalizeSettings({monitored_domains:['example.com'],certificate_checks:{'example.com':{check_public:true,check_origin:true,origin_ip:'2001:db8::10'}}});
   assert.deepStrictEqual(originSettings.certificate_checks['example.com'],{check_public:true,check_origin:true,origin_ip:'2001:db8::10'});
   assert.throws(()=>app.normalizeSettings({monitored_domains:['example.com'],certificate_checks:{'example.com':{check_public:false,check_origin:false}}}),/at least one certificate check/i);
+  const certificateOnlySettings=app.normalizeSettings({monitored_domains:['example.com'],check_sections:{'example.com':{domain_certificates:true,additional_tls:false,smtp:false,dkim:false,mail_security:false,bimi:false}}});
+  assert.deepStrictEqual(app.settingsConfig(certificateOnlySettings).domains[0].check_sections,{domain_certificates:true,additional_tls:false,smtp:false,dkim:false,mail_security:false,bimi:false});
+  const certificatesOff=app.normalizeSettings({monitored_domains:['example.com'],check_sections:{'example.com':{domain_certificates:false}},certificate_checks:{'example.com':{check_public:false,check_origin:false}}});
+  assert.strictEqual(certificatesOff.certificate_checks['example.com'].check_public,false);
+  assert.throws(()=>app.normalizeSettings({monitored_domains:['example.com'],check_sections:{'example.com':{domain_certificates:false,additional_tls:false,smtp:false,dkim:false,mail_security:false,bimi:false}}}),/at least one check section/);
   assert.throws(()=>app.normalizeSettings({monitored_domains:['example.com'],certificate_checks:{'example.com':{check_origin:true,origin_ip:'not an ip'}}}),/valid origin IPv4 or IPv6/i);
   assert.strictEqual(settings.smtp_probe_hostname,'probe.example.com');
   assert.deepStrictEqual(settings.smtp_profiles['example.com'],{hosting_type:'self_hosted',provider:'auto',expected_hostname:'mail.example.com',relay_context:'external'});
@@ -97,6 +111,7 @@ async function run(){
   const publicOnlyComponent=sslMonitor.componentResult('example.com',[publicCertificate]);
   assert.strictEqual(publicOnlyComponent.evidence.origin,null);
   assert.strictEqual(app.domainScore(Array(10).fill({status:'healthy'}).concat(publicOnlyComponent)),100,'a disabled origin path must not affect the score');
+  assert.strictEqual(app.domainScore([{...certificateComponent,status:'warning',evidence:{...certificateComponent.evidence,score_credit:.55}}]),55,'the certificate component must be the entire score when every other section is disabled');
   assert.strictEqual(sslMonitor.certificateState({...sslJson,days_remaining:29}), 'needs_attention');
   assert.strictEqual(sslMonitor.certificateState({...sslJson,days_remaining:14}), 'urgent');
   assert.strictEqual(sslMonitor.certificateState({...sslJson,days_remaining:7}), 'critical');
@@ -311,7 +326,7 @@ async function run(){
   assert.strictEqual(shards.affected_report_shards,0);
   assert.strictEqual(shards.groups.find(group=>group.category==='OpenSearch security audit logs').unassigned_shards,1);
   process.env.DEMO_MODE='true';const status=await app.refresh();assert.strictEqual(status.domains.length,1);assert.ok(status.summary.critical>0);assert.strictEqual(status.version,require('../package.json').version);assert.strictEqual(status.domains[0].mail_profile.provider,'self_hosted');
-  assert.strictEqual(require('../package.json').version,'3.0.0');
+  assert.strictEqual(require('../package.json').version,'3.1.0');
   const page=fs.readFileSync('public/index.html','utf8'),client=fs.readFileSync('public/app.js','utf8'),styles=fs.readFileSync('public/settings.css','utf8'),icon=fs.readFileSync('public/domainposture.svg','utf8'),standalone=fs.readFileSync('compose.standalone.yml','utf8'),dockerfile=fs.readFileSync('Dockerfile','utf8'),smtpSource=fs.readFileSync('smtp.js','utf8');
   assert.match(page,/DomainPosture/);
   assert.match(page,/id="dashboard-view"/);
@@ -321,7 +336,7 @@ async function run(){
   assert.match(page,/id="log-service"/);
   assert.match(page,/id="service-log"/);
   assert.match(page,/id="service-log-service"/);
-  assert.match(page,/v3\.0\.0/);
+  assert.match(page,/v3\.1\.0/);
   assert.match(page,/Domain Health Dashboard/);
   assert.doesNotMatch(page,/DMARC authentication and SMTP TLS delivery results for the selected history window/);
   assert.match(page,/id="domain-menu-button"/);
@@ -347,6 +362,9 @@ async function run(){
   assert.match(page,/id="check-public-certificate"/);
   assert.match(page,/id="check-origin-certificate"/);
   assert.match(page,/id="origin-ip"/);
+  for(const id of ['section-domain-certificates','section-additional-tls','section-smtp','section-dkim','section-mail-security','section-bimi']) assert.match(page,new RegExp(`id="${id}"`));
+  const domainEditor=page.slice(page.indexOf('<dialog id="domain-dialog"'),page.indexOf('</dialog>',page.indexOf('<dialog id="domain-dialog"')));
+  for(const [before,after] of [['Domain certificates','Additional TLS endpoints'],['Additional TLS endpoints','Mail hosting and SMTP probes'],['Mail hosting and SMTP probes','DKIM selectors'],['DKIM selectors','Mail security review exceptions'],['Mail security review exceptions','BIMI review exceptions']]) assert.ok(domainEditor.indexOf(before)<domainEditor.indexOf(after),`${before} must appear before ${after}`);
   assert.match(page,/id="certificate-check-minutes"/);
   assert.match(page,/id="discord-webhook"/);
   assert.match(page,/id="discord-webhook-clear"/);
@@ -414,6 +432,8 @@ async function run(){
   assert.match(client,/selectSettingsTab/);
   assert.match(client,/renderDomainMenu/);
   assert.match(client,/domainposture-domain-sort/);
+  assert.match(client,/updateDomainSectionVisibility/);
+  assert.match(client,/input\[type="checkbox"\].*role.*switch/);
   assert.match(client,/MX endpoint results/);
   assert.match(client,/issue\$\{domain\.counts\.critical === 1 \? ' needs' : 's need'\}/);
   assert.ok(fs.existsSync('compose.standalone.yml'));
@@ -421,6 +441,7 @@ async function run(){
   assert.match(standalone,/DOMAINPOSTURE_SETTINGS_PATH/);
   assert.match(standalone,/MAILPOSTURE_SETTINGS_PATH/);
   assert.match(standalone,/DOMAINPOSTURE_DISCORD_WEBHOOK/);
+  assert.match(standalone,/domainposture_secrets_key/);
   assert.match(standalone,/OPENSEARCH_DATA_PATH/);
   assert.match(standalone,/OPENSEARCH_SNAPSHOT_PATH/);
   assert.match(standalone,/type: bind/);
@@ -439,7 +460,7 @@ async function run(){
   assert.match(dockerfile,/dns-security\.js/);
   assert.match(dockerfile,/ssl-monitor\.js/);
   assert.match(dockerfile,/ghcr\.io\/idesyatov\/ssl-watch:v\$\{SSL_WATCH_VERSION\}/);
-  assert.match(dockerfile,/org\.opencontainers\.image\.version="3\.0\.0"/);
+  assert.match(dockerfile,/org\.opencontainers\.image\.version="3\.1\.0"/);
   assert.match(smtpSource,/RCPT TO:<probe@example\.net>/);
   assert.doesNotMatch(smtpSource,/command\(['"]DATA/);
   assert.match(smtpSource,/policyBlock/);
@@ -463,6 +484,8 @@ async function run(){
   assert.match(styles,/\.service-log/);
   assert.match(styles,/\.index-patterns/);
   assert.match(styles,/\.state\.ignored/);
+  assert.match(styles,/Standard on\/off switch/);
+  assert.match(styles,/translateX\(20px\)/);
   assert.match(styles,/--review:#ffd60a/i);
   assert.match(icon,/<svg/);
   assert.match(icon,/check mark/i);

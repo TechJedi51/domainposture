@@ -21,7 +21,7 @@
   <header>
     <a class="brand" href="/" data-route="/">
       <img src="/domainposture.svg" alt="">
-      <span class="brand-copy"><strong>DomainPosture</strong><small id="version">v3.0.0</small></span>
+      <span class="brand-copy"><strong>DomainPosture</strong><small id="version">v3.1.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
       <a class="toolbar-button" href="/" data-route="/"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span>Dashboard</span></a>
@@ -110,7 +110,7 @@
 
       <section id="settings-panel-domains" class="settings-tab-panel" role="tabpanel" aria-labelledby="settings-tab-domains">
         <div class="settings-panel domains-panel">
-          <div class="panel-heading"><div><h2>Monitored domains</h2><p>Add each domain used in a From address. Select edit to manage its DKIM selectors and TLS certificates.</p></div><button class="symbol-button add-symbol" id="add-domain" type="button" aria-label="Add domain" title="Add domain">＋</button></div>
+          <div class="panel-heading"><div><h2>Monitored domains</h2><p>Add each domain used in a From address. Select edit to choose which review sections run and contribute to its score.</p></div><button class="symbol-button add-symbol" id="add-domain" type="button" aria-label="Add domain" title="Add domain">＋</button></div>
           <div id="settings-domain-list" class="editable-list"></div>
         </div>
         <div class="settings-panel">
@@ -120,7 +120,7 @@
           <div class="field"><label for="smtp-probe-hostname">SMTP probe hostname</label><input id="smtp-probe-hostname" type="text" placeholder="probe.example.com"><p>Optional. Use a public hostname whose A/AAAA and PTR records identify this DomainPosture probe. When blank, DomainPosture sends its local address as an SMTP address literal.</p></div>
         </div>
         <div class="settings-panel">
-          <div><h2>Discord notifications</h2><p>Send state-transition alerts. The saved webhook is stored as a server-side secret and is never returned to the browser.</p></div>
+          <div><h2>Discord notifications</h2><p>Send state-transition alerts. The saved webhook is encrypted with the deployment key and is never returned to the browser.</p></div>
           <div class="field"><label for="discord-webhook">Webhook URL</label><input id="discord-webhook" type="password" inputmode="url" autocomplete="new-password" placeholder="Leave blank to keep the configured webhook"><p id="discord-webhook-status"></p></div>
           <label class="toggle"><input id="discord-webhook-clear" type="checkbox"><span>Remove the webhook saved in DomainPosture</span></label>
           <label class="toggle"><input id="discord-enabled" type="checkbox"><span>Enable Discord notifications</span></label>
@@ -256,41 +256,59 @@
       <div class="editor-heading"><small>Domain configuration</small><h2 id="domain-editor-title">Add domain</h2></div>
       <div class="field"><label for="domain-name">Domain name</label><input id="domain-name" type="text" placeholder="example.com" autocomplete="off" required></div>
       <section class="editor-section">
-        <div><h3>Mail hosting and SMTP probes</h3><p>Choose who controls the inbound mail servers. Automatic detection recognizes Google Workspace, Microsoft 365, Hover Mail, iCloud Mail, and self-hosted MX names. Select Kerio Connect when DomainPosture cannot identify the server software from DNS.</p></div>
-        <div class="two-fields"><div class="field"><label for="smtp-hosting-type">Hosting type</label><select id="smtp-hosting-type"><option value="auto">Detect automatically</option><option value="self_hosted">Self-hosted</option><option value="managed">Managed provider</option><option value="no_inbound">Does not receive mail</option></select></div><div class="field"><label for="smtp-provider">Provider</label><select id="smtp-provider"><option value="auto">Detect automatically</option><option value="kerio">Kerio Connect</option><option value="google">Google Workspace</option><option value="microsoft">Microsoft 365</option><option value="hover">Hover Mail</option><option value="icloud">iCloud Mail</option><option value="self_hosted">Self-hosted</option><option value="other">Other provider</option></select></div></div>
-        <div id="smtp-expected-host-field" class="field"><label for="smtp-expected-host">Expected server identity</label><input id="smtp-expected-host" type="text" placeholder="mail.example.com"><p>Optional for self-hosted services. DomainPosture compares the PTR and SMTP banner with this hostname.</p></div>
-        <div class="field"><label for="smtp-relay-context">Probe network location</label><select id="smtp-relay-context"><option value="auto">Not specified</option><option value="external">External and untrusted</option><option value="internal">Internal or trusted</option></select><p>An accepted external recipient is critical only when this installation is known to run outside the mail server’s trusted network.</p></div>
-        <p class="settings-note">Provider selection changes responsibility and recommendations, but it never suppresses definite MX, STARTTLS, certificate, or externally confirmed relay failures.</p>
+        <div><h3>Domain certificates</h3><p>Monitor the public certificate resolved through DNS and, optionally, a different certificate served directly by an origin IP.</p></div>
+        <label class="toggle section-toggle"><input id="section-domain-certificates" type="checkbox"><span>Enable domain certificate checks</span></label>
+        <div class="section-settings" data-section-settings="domain_certificates">
+          <label class="toggle"><input id="check-public-certificate" type="checkbox"><span>Check public certificate</span></label>
+          <label class="toggle"><input id="check-origin-certificate" type="checkbox"><span>Check origin certificate</span></label>
+          <div id="origin-ip-field" class="field" hidden><label for="origin-ip">Origin IP</label><input id="origin-ip" type="text" inputmode="text" placeholder="192.0.2.10"><p>Required for origin checking. IPv4 and IPv6 are supported.</p></div>
+        </div>
       </section>
       <section class="editor-section">
-        <div><h3>DKIM selectors</h3><p>Add the selector labels used by this domain’s mail senders.</p></div>
-        <div id="selector-list" class="editable-list compact-list"></div>
-        <div class="inline-editor"><input id="selector-input" type="text" placeholder="selector1" aria-label="DKIM selector"><button id="selector-add" class="symbol-button" type="button" aria-label="Add DKIM selector" title="Add selector">＋</button></div>
+        <div><h3>Additional TLS endpoints</h3><p>Monitor direct-TLS services such as HTTPS 443, SMTP 465, or IMAP 993. These endpoints are scored only while this section is enabled.</p></div>
+        <label class="toggle section-toggle"><input id="section-additional-tls" type="checkbox"><span>Enable additional TLS endpoint checks</span></label>
+        <div class="section-settings" data-section-settings="additional_tls">
+          <div id="endpoint-list" class="editable-list compact-list"></div>
+          <div class="inline-editor endpoint-editor"><input id="endpoint-host" type="text" placeholder="mail.example.com" aria-label="TLS host"><input id="endpoint-port" type="number" min="1" max="65535" value="443" aria-label="TLS port"><button id="endpoint-add" class="symbol-button" type="button" aria-label="Add TLS endpoint" title="Add endpoint">＋</button></div>
+        </div>
       </section>
       <section class="editor-section">
-        <div><h3>Domain certificates</h3><p>Public uses normal DNS. Origin connects to the specified IP while validating this domain through TLS SNI.</p></div>
-        <label class="toggle"><input id="check-public-certificate" type="checkbox"><span>Check Public Certificate</span></label>
-        <label class="toggle"><input id="check-origin-certificate" type="checkbox"><span>Check Origin Certificate</span></label>
-        <div id="origin-ip-field" class="field" hidden><label for="origin-ip">Origin IP</label><input id="origin-ip" type="text" inputmode="text" placeholder="192.0.2.10"><p>Required for origin checking. IPv4 and IPv6 are supported.</p></div>
+        <div><h3>Mail hosting and SMTP probes</h3><p>Identify the inbound mail provider and test MX connectivity, server identity, STARTTLS, certificate validation, timing, and relay behavior.</p></div>
+        <label class="toggle section-toggle"><input id="section-smtp" type="checkbox"><span>Enable mail hosting and SMTP probes</span></label>
+        <div class="section-settings" data-section-settings="smtp">
+          <div class="two-fields"><div class="field"><label for="smtp-hosting-type">Hosting type</label><select id="smtp-hosting-type"><option value="auto">Detect automatically</option><option value="self_hosted">Self-hosted</option><option value="managed">Managed provider</option><option value="no_inbound">Does not receive mail</option></select></div><div class="field"><label for="smtp-provider">Provider</label><select id="smtp-provider"><option value="auto">Detect automatically</option><option value="kerio">Kerio Connect</option><option value="google">Google Workspace</option><option value="microsoft">Microsoft 365</option><option value="hover">Hover Mail</option><option value="icloud">iCloud Mail</option><option value="self_hosted">Self-hosted</option><option value="other">Other provider</option></select></div></div>
+          <div id="smtp-expected-host-field" class="field"><label for="smtp-expected-host">Expected server identity</label><input id="smtp-expected-host" type="text" placeholder="mail.example.com"><p>Optional for self-hosted services. DomainPosture compares the PTR and SMTP banner with this hostname.</p></div>
+          <div class="field"><label for="smtp-relay-context">Probe network location</label><select id="smtp-relay-context"><option value="auto">Not specified</option><option value="external">External and untrusted</option><option value="internal">Internal or trusted</option></select><p>An accepted external recipient is critical only when this installation is known to run outside the mail server’s trusted network.</p></div>
+          <p class="settings-note">Provider selection changes responsibility and recommendations, but it never suppresses definite MX, STARTTLS, certificate, or externally confirmed relay failures.</p>
+        </div>
       </section>
       <section class="editor-section">
-        <div><h3>Additional TLS endpoints</h3><p>Optional. Add direct-TLS services such as HTTPS 443, SMTP 465, or IMAP 993.</p></div>
-        <div id="endpoint-list" class="editable-list compact-list"></div>
-        <div class="inline-editor endpoint-editor"><input id="endpoint-host" type="text" placeholder="mail.example.com" aria-label="TLS host"><input id="endpoint-port" type="number" min="1" max="65535" value="443" aria-label="TLS port"><button id="endpoint-add" class="symbol-button" type="button" aria-label="Add TLS endpoint" title="Add endpoint">＋</button></div>
+        <div><h3>DKIM selectors</h3><p>Check the selector labels used by this domain’s mail senders.</p></div>
+        <label class="toggle section-toggle"><input id="section-dkim" type="checkbox"><span>Enable DKIM selector checks</span></label>
+        <div class="section-settings" data-section-settings="dkim">
+          <div id="selector-list" class="editable-list compact-list"></div>
+          <div class="inline-editor"><input id="selector-input" type="text" placeholder="selector1" aria-label="DKIM selector"><button id="selector-add" class="symbol-button" type="button" aria-label="Add DKIM selector" title="Add selector">＋</button></div>
+        </div>
       </section>
       <section class="editor-section">
-        <div><h3>Mail security review exceptions</h3><p>Ignore an intentionally absent MTA-STS policy. A partially configured or invalid policy still needs attention.</p></div>
-        <div class="field"><label for="mta-sts-ignore-mode">No MTA-STS configuration</label><select id="mta-sts-ignore-mode"><option value="none">Continue showing Needs action</option><option value="temporary">Ignore for a set period</option><option value="permanent">Ignore permanently</option></select></div>
-        <div id="mta-sts-ignore-months-field" class="field" hidden><label for="mta-sts-ignore-months">Number of months</label><input id="mta-sts-ignore-months" type="number" min="1" max="120" value="6"><p id="mta-sts-ignore-expiration"></p></div>
-        <p class="settings-note">Ignored controls remain visible and labeled Ignored. They are removed from the attention queue and do not lower the posture score.</p>
+        <div><h3>Mail security review exceptions</h3><p>Enable the general mail-security score for DMARC, SPF, report history, MTA-STS, TLS reporting, and reputation. You can still ignore an intentionally absent MTA-STS policy.</p></div>
+        <label class="toggle section-toggle"><input id="section-mail-security" type="checkbox"><span>Enable mail security checks</span></label>
+        <div class="section-settings" data-section-settings="mail_security">
+          <div class="field"><label for="mta-sts-ignore-mode">No MTA-STS configuration</label><select id="mta-sts-ignore-mode"><option value="none">Continue showing Needs action</option><option value="temporary">Ignore for a set period</option><option value="permanent">Ignore permanently</option></select></div>
+          <div id="mta-sts-ignore-months-field" class="field" hidden><label for="mta-sts-ignore-months">Number of months</label><input id="mta-sts-ignore-months" type="number" min="1" max="120" value="6"><p id="mta-sts-ignore-expiration"></p></div>
+          <p class="settings-note">Ignored controls remain visible and labeled Ignored. They stay in the score at full credit and do not create an attention item.</p>
+        </div>
       </section>
       <section class="editor-section">
-        <div><h3>BIMI review exceptions</h3><p>Ignore an intentionally self-asserted logo or intentionally absent logo. Invalid records, unsafe logos, and unmet DMARC requirements still need attention.</p></div>
-        <div class="field"><label for="bimi-ignore-mode">Self-asserted logo</label><select id="bimi-ignore-mode"><option value="none">Continue showing Review</option><option value="temporary">Ignore for a set period</option><option value="permanent">Ignore permanently</option></select></div>
-        <div id="bimi-ignore-months-field" class="field" hidden><label for="bimi-ignore-months">Number of months</label><input id="bimi-ignore-months" type="number" min="1" max="120" value="6"><p id="bimi-ignore-expiration"></p></div>
-        <div class="field"><label for="bimi-no-logo-ignore-mode">No BIMI logo</label><select id="bimi-no-logo-ignore-mode"><option value="none">Continue showing Review</option><option value="temporary">Ignore for a set period</option><option value="permanent">Ignore permanently</option></select></div>
-        <div id="bimi-no-logo-ignore-months-field" class="field" hidden><label for="bimi-no-logo-ignore-months">Number of months</label><input id="bimi-no-logo-ignore-months" type="number" min="1" max="120" value="6"><p id="bimi-no-logo-ignore-expiration"></p></div>
-        <p class="settings-note">Each ignored result remains visible on the BIMI card and is labeled Ignored. It is removed from the attention queue and does not lower the posture score.</p>
+        <div><h3>BIMI review exceptions</h3><p>Check BIMI and keep the existing options to ignore an intentionally self-asserted or absent logo. Invalid records, unsafe logos, and unmet DMARC requirements still need attention.</p></div>
+        <label class="toggle section-toggle"><input id="section-bimi" type="checkbox"><span>Enable BIMI checks</span></label>
+        <div class="section-settings" data-section-settings="bimi">
+          <div class="field"><label for="bimi-ignore-mode">Self-asserted logo</label><select id="bimi-ignore-mode"><option value="none">Continue showing Review</option><option value="temporary">Ignore for a set period</option><option value="permanent">Ignore permanently</option></select></div>
+          <div id="bimi-ignore-months-field" class="field" hidden><label for="bimi-ignore-months">Number of months</label><input id="bimi-ignore-months" type="number" min="1" max="120" value="6"><p id="bimi-ignore-expiration"></p></div>
+          <div class="field"><label for="bimi-no-logo-ignore-mode">No BIMI logo</label><select id="bimi-no-logo-ignore-mode"><option value="none">Continue showing Review</option><option value="temporary">Ignore for a set period</option><option value="permanent">Ignore permanently</option></select></div>
+          <div id="bimi-no-logo-ignore-months-field" class="field" hidden><label for="bimi-no-logo-ignore-months">Number of months</label><input id="bimi-no-logo-ignore-months" type="number" min="1" max="120" value="6"><p id="bimi-no-logo-ignore-expiration"></p></div>
+          <p class="settings-note">Each ignored result remains visible on the BIMI card and is labeled Ignored. It stays in the score at full credit and does not create an attention item.</p>
+        </div>
       </section>
       <p id="domain-message" class="failure" role="alert"></p>
       <div class="dialog-actions"><button class="secondary domain-cancel" type="button">Cancel</button><button type="submit">Save domain</button></div>

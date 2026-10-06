@@ -431,6 +431,7 @@ function renderSettingsDomains() {
     const selectors = settings.dkim_selectors[domain] || [];
     const endpoints = settings.tls_endpoints[domain] || [];
     const smtpProfile = settings.smtp_profiles?.[domain] || { hosting_type: 'auto', provider: 'auto' };
+    const sections = { domain_certificates: true, additional_tls: true, smtp: true, dkim: true, mail_security: true, bimi: true, ...(settings.check_sections?.[domain] || {}) };
     const certificate = settings.certificate_checks?.[domain] || { check_public: true, check_origin: false, origin_ip: '' };
     const configured = settings.bimi_exceptions?.[domain] || {};
     const exceptions = [configured.self_asserted || (configured.mode ? configured : null), configured.no_logo].filter(value => value?.mode);
@@ -438,9 +439,10 @@ function renderSettingsDomains() {
     const active = [...exceptions, ...controlExceptions].filter(value => value.mode === 'permanent' || (value.mode === 'until' && new Date(value.expires_at) > new Date()));
     const exceptionNote = active.length ? ` · ${active.length} review exception${active.length === 1 ? '' : 's'}` : '';
     const detectedProfile = state.data?.domains?.find(item => item.domain === domain)?.mail_profile;
-    const mailNote = detectedProfile ? mailProfileText(detectedProfile) : `Hosting type: ${hostingLabels[smtpProfile.hosting_type] || 'Automatic'} (${smtpProfile.hosting_type === 'auto' ? 'Auto-detected' : 'Selected'}) · Provider: ${providerLabels[smtpProfile.provider] || 'Automatic'} (${smtpProfile.provider === 'auto' ? 'Auto-detected' : 'Selected'})`;
-    const certificateNote = `${certificate.check_public ? 'Public certificate' : ''}${certificate.check_public && certificate.check_origin ? ' + ' : ''}${certificate.check_origin ? `Origin certificate (${certificate.origin_ip})` : ''}`;
-    return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${esc(mailNote)} · ${esc(certificateNote)} · ${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} additional TLS endpoint${endpoints.length === 1 ? '' : 's'}${esc(exceptionNote)}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
+    const mailNote = !sections.smtp ? 'SMTP probes off' : detectedProfile ? mailProfileText(detectedProfile) : `Hosting type: ${hostingLabels[smtpProfile.hosting_type] || 'Automatic'} (${smtpProfile.hosting_type === 'auto' ? 'Auto-detected' : 'Selected'}) · Provider: ${providerLabels[smtpProfile.provider] || 'Automatic'} (${smtpProfile.provider === 'auto' ? 'Auto-detected' : 'Selected'})`;
+    const certificateNote = sections.domain_certificates ? `${certificate.check_public ? 'Public certificate' : ''}${certificate.check_public && certificate.check_origin ? ' + ' : ''}${certificate.check_origin ? `Origin certificate (${certificate.origin_ip})` : ''}` : 'Certificate checks off';
+    const enabledCount = Object.values(sections).filter(Boolean).length;
+    return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${enabledCount} of 6 check sections enabled · ${esc(mailNote)} · ${esc(certificateNote)} · ${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} additional TLS endpoint${endpoints.length === 1 ? '' : 's'}${esc(exceptionNote)}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
   }).join('') : '<div class="empty-list"><p>No domains are configured.</p><button type="button" data-add-domain>Add a domain</button></div>';
 }
 
@@ -564,12 +566,14 @@ function openDomainEditor(index = null) {
   const controlExceptions = clone(state.settings.control_exceptions?.[domain] || {});
   const smtpProfile = clone(state.settings.smtp_profiles?.[domain] || { hosting_type: 'auto', provider: 'auto', expected_hostname: '', relay_context: 'auto' });
   const certificateChecks = clone(state.settings.certificate_checks?.[domain] || { check_public: true, check_origin: false, origin_ip: '' });
+  const checkSections = clone(state.settings.check_sections?.[domain] || { domain_certificates: true, additional_tls: true, smtp: true, dkim: true, mail_security: true, bimi: true });
   state.editor = {
     index,
     originalDomain: domain,
     selectors: clone(state.settings.dkim_selectors[domain] || []),
     endpoints: clone(state.settings.tls_endpoints[domain] || []),
     certificateChecks,
+    checkSections,
     smtpProfile,
     bimiExceptionsOriginal: exceptions,
     bimiExceptionDirty: { self_asserted: false, no_logo: false },
@@ -586,6 +590,12 @@ function openDomainEditor(index = null) {
   $('#smtp-relay-context').value = smtpProfile.relay_context || 'auto';
   $('#check-public-certificate').checked = certificateChecks.check_public !== false;
   $('#check-origin-certificate').checked = certificateChecks.check_origin === true;
+  $('#section-domain-certificates').checked = checkSections.domain_certificates !== false;
+  $('#section-additional-tls').checked = checkSections.additional_tls !== false;
+  $('#section-smtp').checked = checkSections.smtp !== false;
+  $('#section-dkim').checked = checkSections.dkim !== false;
+  $('#section-mail-security').checked = checkSections.mail_security !== false;
+  $('#section-bimi').checked = checkSections.bimi !== false;
   $('#origin-ip').value = certificateChecks.origin_ip || '';
   $('#selector-input').value = '';
   $('#selector-add').textContent = '＋';
@@ -601,7 +611,23 @@ function openDomainEditor(index = null) {
   updateControlIgnoreVisibility();
   updateMailHostingFields();
   updateOriginCertificateVisibility();
+  updateDomainSectionVisibility();
   $('#domain-dialog').showModal();
+}
+
+function updateDomainSectionVisibility() {
+  const sections = {
+    domain_certificates: '#section-domain-certificates',
+    additional_tls: '#section-additional-tls',
+    smtp: '#section-smtp',
+    dkim: '#section-dkim',
+    mail_security: '#section-mail-security',
+    bimi: '#section-bimi'
+  };
+  for (const [name, selector] of Object.entries(sections)) {
+    const content = document.querySelector(`[data-section-settings="${name}"]`);
+    if (content) content.hidden = !$(selector).checked;
+  }
 }
 
 function updateOriginCertificateVisibility() {
@@ -715,11 +741,20 @@ function saveDomain(event) {
   if (duplicate >= 0) return showDomainError('That domain is already monitored.');
   const checkPublic = $('#check-public-certificate').checked;
   const checkOrigin = $('#check-origin-certificate').checked;
+  const checkSections = {
+    domain_certificates: $('#section-domain-certificates').checked,
+    additional_tls: $('#section-additional-tls').checked,
+    smtp: $('#section-smtp').checked,
+    dkim: $('#section-dkim').checked,
+    mail_security: $('#section-mail-security').checked,
+    bimi: $('#section-bimi').checked
+  };
+  if (!Object.values(checkSections).some(Boolean)) return showDomainError('Enable at least one check section for this domain.');
   const originIp = $('#origin-ip').value.trim();
-  if (!checkPublic && !checkOrigin) return showDomainError('Enable at least one certificate check.');
+  if (checkSections.domain_certificates && !checkPublic && !checkOrigin) return showDomainError('Enable at least one certificate check, or switch off Domain certificates.');
   const looksLikeIpv4 = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(originIp) && originIp.split('.').every(part => Number(part) <= 255);
   const looksLikeIpv6 = /^[0-9a-f:]+$/i.test(originIp) && originIp.includes(':');
-  if (checkOrigin && !looksLikeIpv4 && !looksLikeIpv6) return showDomainError('Enter a valid origin IPv4 or IPv6 address.');
+  if (checkSections.domain_certificates && checkOrigin && !looksLikeIpv4 && !looksLikeIpv6) return showDomainError('Enter a valid origin IPv4 or IPv6 address.');
   const expectedHostname = $('#smtp-expected-host').value.trim().toLowerCase().replace(/\.$/, '');
   if (expectedHostname && !/^(?=.{1,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(expectedHostname)) return showDomainError('Enter a valid expected SMTP hostname or leave it blank.');
   let selfAssertedException; let noLogoException; let mtaStsException;
@@ -736,6 +771,7 @@ function saveDomain(event) {
     delete state.settings.dkim_selectors[oldDomain];
     delete state.settings.tls_endpoints[oldDomain];
     if (state.settings.certificate_checks) delete state.settings.certificate_checks[oldDomain];
+    if (state.settings.check_sections) delete state.settings.check_sections[oldDomain];
     if (state.settings.smtp_profiles) delete state.settings.smtp_profiles[oldDomain];
     if (state.settings.bimi_exceptions) delete state.settings.bimi_exceptions[oldDomain];
     if (state.settings.control_exceptions) delete state.settings.control_exceptions[oldDomain];
@@ -744,6 +780,8 @@ function saveDomain(event) {
   state.settings.tls_endpoints[domain] = clone(state.editor.endpoints);
   state.settings.certificate_checks ||= {};
   state.settings.certificate_checks[domain] = { check_public: checkPublic, check_origin: checkOrigin, origin_ip: checkOrigin ? originIp : '' };
+  state.settings.check_sections ||= {};
+  state.settings.check_sections[domain] = checkSections;
   state.settings.smtp_profiles ||= {};
   state.settings.smtp_profiles[domain] = { hosting_type: $('#smtp-hosting-type').value, provider: $('#smtp-provider').disabled ? 'auto' : $('#smtp-provider').value, expected_hostname: expectedHostname, relay_context: $('#smtp-relay-context').value };
   state.settings.bimi_exceptions ||= {};
@@ -931,6 +969,7 @@ $('#refresh').onclick = async () => {
 
 $('#settings-form').addEventListener('submit', saveSettings);
 $('#domain-form').addEventListener('submit', saveDomain);
+document.querySelectorAll('input[type="checkbox"]').forEach(input => input.setAttribute('role', 'switch'));
 $('#add-domain').onclick = () => openDomainEditor();
 $('#selector-add').onclick = addSelector;
 $('#endpoint-add').onclick = addEndpoint;
@@ -949,6 +988,9 @@ $('#report-source').onchange = updateSettingsVisibility;
 $('#mailbox-enabled').onchange = updateSettingsVisibility;
 $('#snapshots-enabled').onchange = updateSettingsVisibility;
 $('#check-origin-certificate').onchange = updateOriginCertificateVisibility;
+['#section-domain-certificates', '#section-additional-tls', '#section-smtp', '#section-dkim', '#section-mail-security', '#section-bimi'].forEach(selector => {
+  $(selector).onchange = updateDomainSectionVisibility;
+});
 $('#archive-folder').oninput = updateSettingsVisibility;
 $('#bimi-ignore-mode').onchange = () => { state.editor.bimiExceptionDirty.self_asserted = true; updateBimiIgnoreVisibility(); };
 $('#bimi-ignore-months').oninput = () => { state.editor.bimiExceptionDirty.self_asserted = true; updateBimiIgnoreVisibility(); };
@@ -1046,6 +1088,7 @@ document.onclick = async event => {
     delete state.settings.tls_endpoints[removed];
     if (state.settings.smtp_profiles) delete state.settings.smtp_profiles[removed];
     if (state.settings.certificate_checks) delete state.settings.certificate_checks[removed];
+    if (state.settings.check_sections) delete state.settings.check_sections[removed];
     if (state.settings.bimi_exceptions) delete state.settings.bimi_exceptions[removed];
     if (state.settings.control_exceptions) delete state.settings.control_exceptions[removed];
     renderSettingsDomains();

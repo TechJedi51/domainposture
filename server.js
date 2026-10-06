@@ -16,6 +16,7 @@ const PORT = Number(process.env.PORT || 8080);
 const APP_VERSION = process.env.APP_VERSION || PACKAGE_VERSION;
 const SETTINGS_PATH = process.env.DOMAINPOSTURE_SETTINGS_FILE || process.env.SETTINGS_PATH || '/data/settings.json';
 const SECRETS_PATH = process.env.DOMAINPOSTURE_SECRETS_FILE || process.env.SECRETS_PATH || '/data/secrets.json';
+const SECRETS_KEY_FILE = process.env.DOMAINPOSTURE_SECRETS_KEY_FILE || '/run/secrets/domainposture_secrets_key';
 const STATE_PATH = process.env.DOMAINPOSTURE_STATE_PATH || '/data/domainposture-state.json';
 const PARSEDMARC_CONFIG_PATH = process.env.PARSEDMARC_CONFIG_PATH || '/data/parsedmarc/config.ini';
 const PARSEDMARC_STATUS_PATH = process.env.PARSEDMARC_STATUS_PATH || '/run/parsedmarc/status.json';
@@ -252,7 +253,25 @@ function normalizeSmtpProfiles(input = {}, monitoredDomains = []) {
   return output;
 }
 
-function normalizeCertificateChecks(input = {}, monitoredDomains = []) {
+const DEFAULT_CHECK_SECTIONS = Object.freeze({
+  domain_certificates: true,
+  additional_tls: true,
+  smtp: true,
+  dkim: true,
+  mail_security: true,
+  bimi: true
+});
+
+function normalizeCheckSections(input = {}, monitoredDomains = []) {
+  return Object.fromEntries(monitoredDomains.map(domain => {
+    const configured = input?.[domain] || {};
+    const sections = Object.fromEntries(Object.entries(DEFAULT_CHECK_SECTIONS).map(([key, fallback]) => [key, configured[key] === undefined ? fallback : configured[key] === true]));
+    if (!Object.values(sections).some(Boolean)) throw new Error(`Enable at least one check section for ${domain}`);
+    return [domain, sections];
+  }));
+}
+
+function normalizeCertificateChecks(input = {}, monitoredDomains = [], checkSections = {}) {
   const output = {};
   for (const domain of monitoredDomains) {
     const configured = input?.[domain] || {};
@@ -261,7 +280,7 @@ function normalizeCertificateChecks(input = {}, monitoredDomains = []) {
       : configured.check_public !== false;
     const checkOrigin = configured.check_origin === true || configured.check_origin_cert === true;
     const originIp = textValue(configured.origin_ip, '', 64);
-    if (!checkPublic && !checkOrigin) throw new Error(`Enable at least one certificate check for ${domain}`);
+    if (checkSections[domain]?.domain_certificates !== false && !checkPublic && !checkOrigin) throw new Error(`Enable at least one certificate check for ${domain}`);
     if (checkOrigin && !net.isIP(originIp)) throw new Error(`Enter a valid origin IPv4 or IPv6 address for ${domain}`);
     output[domain] = { check_public: checkPublic, check_origin: checkOrigin, origin_ip: checkOrigin ? originIp : '' };
   }
@@ -339,12 +358,14 @@ function normalizeSettings(input = {}) {
   if (snapshotMin > snapshotMax) throw new Error('Minimum snapshots cannot exceed maximum snapshots');
   const smtpProbeHostname = textValue(input.smtp_probe_hostname, process.env.SMTP_PROBE_HOSTNAME || '', 253).toLowerCase().replace(/\.$/, '');
   if (smtpProbeHostname && !validDomain(smtpProbeHostname)) throw new Error('SMTP probe hostname must be a fully qualified domain name');
+  const checkSections = normalizeCheckSections(input.check_sections, domains);
   return {
-    schema_version: 8,
+    schema_version: 9,
     monitored_domains: domains,
+    check_sections: checkSections,
     dkim_selectors: selectors,
     tls_endpoints: endpoints,
-    certificate_checks: normalizeCertificateChecks(input.certificate_checks, domains),
+    certificate_checks: normalizeCertificateChecks(input.certificate_checks, domains, checkSections),
     certificate_check_minutes: boundedNumber(input.certificate_check_minutes, 360, 5, 10080, 'Certificate check interval'),
     notifications: normalizeNotifications(input.notifications),
     smtp_profiles: normalizeSmtpProfiles(input.smtp_profiles, domains),
@@ -428,8 +449,79 @@ function normalizeSettings(input = {}) {
   };
 }
 
+function decodeSecretsKey(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const key = /^[a-f0-9]{64}$/i.test(raw) ? Buffer.from(raw, 'hex') : Buffer.from(raw, 'base64');
+  if (key.length !== 32) throw new Error('The DomainPosture secrets key must be exactly 32 bytes encoded as base64 or 64 hexadecimal characters.');
+  return key;
+}
+
+function secretsEncryptionKey() {
+  if (process.env.DOMAINPOSTURE_SECRETS_KEY) return decodeSecretsKey(process.env.DOMAINPOSTURE_SECRETS_KEY);
+  try { return decodeSecretsKey(fs.readFileSync(SECRETS_KEY_FILE, 'utf8')); }
+  catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw new Error(`The DomainPosture secrets key could not be read: ${error.message}`);
+  }
+}
+
+function encryptedSecretsDocument(value = {}) {
+  return value?.schema_version === 1 && value?.algorithm === 'aes-256-gcm' && typeof value?.ciphertext === 'string';
+}
+
+function encryptSecrets(secrets, key = secretsEncryptionKey()) {
+  if (!key) throw new Error('A DomainPosture secrets encryption key is required. Mount it at /run/secrets/domainposture_secrets_key or set DOMAINPOSTURE_SECRETS_KEY_FILE.');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(Buffer.from('DomainPosture secrets v1'));
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(secrets), 'utf8'), cipher.final()]);
+  return { schema_version: 1, algorithm: 'aes-256-gcm', iv: iv.toString('base64'), tag: cipher.getAuthTag().toString('base64'), ciphertext: ciphertext.toString('base64') };
+}
+
+function decryptSecrets(document, key = secretsEncryptionKey()) {
+  if (!key) throw new Error('The encrypted DomainPosture secrets file cannot be opened because its encryption key is unavailable.');
+  try {
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(document.iv, 'base64'));
+    decipher.setAAD(Buffer.from('DomainPosture secrets v1'));
+    decipher.setAuthTag(Buffer.from(document.tag, 'base64'));
+    return JSON.parse(Buffer.concat([decipher.update(Buffer.from(document.ciphertext, 'base64')), decipher.final()]).toString('utf8'));
+  } catch (_) {
+    throw new Error('The encrypted DomainPosture secrets file could not be opened. Verify that the configured encryption key is the original key.');
+  }
+}
+
 function readSecrets() {
-  try { return JSON.parse(fs.readFileSync(SECRETS_PATH, 'utf8')); } catch (_) { return {}; }
+  try {
+    const saved = JSON.parse(fs.readFileSync(SECRETS_PATH, 'utf8'));
+    return encryptedSecretsDocument(saved) ? decryptSecrets(saved) : saved;
+  } catch (error) {
+    if (error.code === 'ENOENT') return {};
+    throw error;
+  }
+}
+
+function secretsStorageStatus() {
+  let saved;
+  try { saved = JSON.parse(fs.readFileSync(SECRETS_PATH, 'utf8')); }
+  catch (error) {
+    if (error.code === 'ENOENT') {
+      try {
+        const keyReady = Boolean(secretsEncryptionKey());
+        return result('secrets_storage', 'Secret storage', keyReady ? 'healthy' : 'warning', keyReady ? 'Encryption key ready' : 'Encryption key not configured', keyReady ? 'No application-managed secrets have been saved yet.' : 'A key is required before DomainPosture can save a webhook or mailbox password.', keyReady ? 'No action required.' : 'Create a 32-byte key and mount it as /run/secrets/domainposture_secrets_key.');
+      } catch (keyError) {
+        return result('secrets_storage', 'Secret storage', 'critical', 'Encryption key invalid', keyError.message, 'Replace the invalid key file only if no encrypted secrets exist. Otherwise, restore the original key.');
+      }
+    }
+    return result('secrets_storage', 'Secret storage', 'critical', 'Secrets file unavailable', error.message, 'Verify the secrets file and persistent storage permissions.');
+  }
+  if (!encryptedSecretsDocument(saved)) return result('secrets_storage', 'Secret storage', 'warning', 'Legacy plaintext secrets', 'The existing secrets file is readable but is not encrypted.', 'Configure the encryption key and save Settings once to migrate the file in place.');
+  try {
+    decryptSecrets(saved);
+    return result('secrets_storage', 'Secret storage', 'healthy', 'Secrets encrypted', 'Application-managed secrets use authenticated AES-256-GCM encryption at rest.', 'Back up the encryption key separately from the application data.');
+  } catch (error) {
+    return result('secrets_storage', 'Secret storage', 'critical', 'Encrypted secrets unavailable', error.message, 'Restore the original encryption key. Do not replace it while encrypted secrets still exist.');
+  }
 }
 
 function defaultOperationalState() {
@@ -563,7 +655,7 @@ async function saveSettings(value) {
     secrets.discord_webhook = validatedWebhook.toString();
   }
   if (settings.mailbox.enabled && (!settings.mailbox.host || !settings.mailbox.username || !secrets.imap_password)) throw new Error('IMAP host, username, and password are required when report collection is enabled');
-  await atomicWrite(SECRETS_PATH, `${JSON.stringify(secrets, null, 2)}\n`);
+  await atomicWrite(SECRETS_PATH, `${JSON.stringify(encryptSecrets(secrets), null, 2)}\n`);
   await atomicWrite(SETTINGS_PATH, `${JSON.stringify(settings, null, 2)}\n`);
   await atomicWrite(PARSEDMARC_CONFIG_PATH, parsedmarcIni(settings, secrets));
   runtimeSettings = settings;
@@ -602,6 +694,7 @@ function settingsConfig(settings = getSettings()) {
     },
     domains: settings.monitored_domains.map(domain => ({
       domain,
+      check_sections: settings.check_sections[domain] || { ...DEFAULT_CHECK_SECTIONS },
       dkim_selectors: settings.dkim_selectors[domain] || [],
       tls_endpoints: settings.tls_endpoints[domain] || [],
       certificate_checks: settings.certificate_checks[domain],
@@ -697,6 +790,7 @@ async function systemStatus() {
   } catch (error) {
     checks.push(result('storage', 'Settings storage', 'critical', 'Storage is not writable', error.message, 'Correct ownership and permissions on the DomainPosture data directories.', { settings_directory: path.dirname(SETTINGS_PATH), parsedmarc_directory: path.dirname(PARSEDMARC_CONFIG_PATH) }));
   }
+  checks.push(secretsStorageStatus());
 
   try {
     await fs.promises.access(sslMonitor.SSL_WATCH_PATH, fs.constants.X_OK);
@@ -1172,30 +1266,47 @@ function reconcileMtaSts(stsCheck, smtpCheck) {
 }
 
 async function checkDomain(entry, config, options = {}) {
-  const mailProfile = await resolveSmtpProfile(entry.domain, entry.smtp_profile);
+  const sections = { ...DEFAULT_CHECK_SECTIONS, ...(entry.check_sections || {}) };
+  const mailFeaturesEnabled = sections.mail_security || sections.smtp || sections.dkim || sections.bimi;
+  const mailProfile = mailFeaturesEnabled
+    ? await resolveSmtpProfile(entry.domain, entry.smtp_profile)
+    : smtpProfile(entry.domain, entry.smtp_profile, []);
   const noInbound = mailProfile.hosting_type === 'no_inbound';
   const notApplicable = (id, label) => result(id, label, 'info', 'Not applicable', 'This domain is configured not to receive inbound email.', 'No action required while inbound mail remains disabled.', { mail_profile: mailProfile });
-  const dm = await dmarc(entry.domain);
-  const values = await Promise.all([
-    spfCheck(entry.domain, { timeout_ms: requestTimeoutMs, mail_profile: mailProfile }),
-    noInbound ? Promise.resolve(notApplicable('mta_sts', 'MTA-STS')) : mtaSts(entry.domain),
-    noInbound ? Promise.resolve(notApplicable('tls_rpt', 'TLS reporting')) : tlsRptCheck(entry.domain, { timeout_ms: requestTimeoutMs }),
-    smtpDiagnostics(entry.domain, { timeout_ms: requestTimeoutMs, profile: mailProfile, ehlo_hostname: config.smtp_probe_hostname }),
-    bimi(entry.domain, dm, entry.bimi_exception),
-    dkim(entry.domain, entry.dkim_selectors, mailProfile),
-    reports(entry.domain, config.opensearch, entry.report_days),
-    failureReports(entry.domain, config.opensearch, entry.report_days),
-    smtpTlsReports(entry.domain, config.opensearch, entry.report_days),
-    reputationCheck(entry.domain, { timeout_ms: requestTimeoutMs }),
-    ...entry.tls_endpoints.map(certificate),
-    domainCertificateComponent(entry, config, options)
+  const dm = sections.mail_security || sections.bimi ? await dmarc(entry.domain) : null;
+  const [senderPolicy, stsResult, tlsreport, smtpService, brand, keys, aggregate, failures, smtpTls, reputation, certs, sslCertificates] = await Promise.all([
+    sections.mail_security ? spfCheck(entry.domain, { timeout_ms: requestTimeoutMs, mail_profile: mailProfile }) : null,
+    sections.mail_security ? (noInbound ? Promise.resolve(notApplicable('mta_sts', 'MTA-STS')) : mtaSts(entry.domain)) : null,
+    sections.mail_security ? (noInbound ? Promise.resolve(notApplicable('tls_rpt', 'TLS reporting')) : tlsRptCheck(entry.domain, { timeout_ms: requestTimeoutMs })) : null,
+    sections.smtp ? smtpDiagnostics(entry.domain, { timeout_ms: requestTimeoutMs, profile: mailProfile, ehlo_hostname: config.smtp_probe_hostname }) : null,
+    sections.bimi ? bimi(entry.domain, dm, entry.bimi_exception) : null,
+    sections.dkim ? dkim(entry.domain, entry.dkim_selectors, mailProfile) : null,
+    sections.mail_security ? reports(entry.domain, config.opensearch, entry.report_days) : null,
+    sections.mail_security ? failureReports(entry.domain, config.opensearch, entry.report_days) : null,
+    sections.mail_security ? smtpTlsReports(entry.domain, config.opensearch, entry.report_days) : null,
+    sections.mail_security ? reputationCheck(entry.domain, { timeout_ms: requestTimeoutMs }) : null,
+    sections.additional_tls ? Promise.all(entry.tls_endpoints.map(certificate)) : [],
+    sections.domain_certificates ? domainCertificateComponent(entry, config, options) : null
   ]);
-  const [senderPolicy, stsResult, tlsreport, smtpService, brand, keys, aggregate, failures, smtpTls, reputation] = values;
-  const certs = values.slice(10, -1);
-  const sslCertificates = values.at(-1);
-  let sts = reconcileMtaSts(stsResult, smtpService);
-  if (!noInbound && isMissingMtaSts(sts)) sts = applyMissingControlException(sts, entry.control_exception?.mta_sts, 'mta_sts_absent');
-  return summarize(entry.domain, [dm, senderPolicy, aggregate, keys, sts, tlsreport, smtpService, sslCertificates, ...certs, brand, reputation], { aggregate: aggregate.evidence || {}, failure: failures, smtp_tls: smtpTls, smtp_diagnostics: smtpService.evidence || {} }, { mail_profile: mailProfile });
+  let sts = stsResult;
+  if (sts) {
+    if (smtpService) sts = reconcileMtaSts(sts, smtpService);
+    if (!noInbound && isMissingMtaSts(sts)) sts = applyMissingControlException(sts, entry.control_exception?.mta_sts, 'mta_sts_absent');
+  }
+  const checks = [
+    ...(sections.mail_security ? [dm, senderPolicy, aggregate, sts, tlsreport, reputation] : []),
+    ...(sections.dkim ? [keys] : []),
+    ...(sections.smtp ? [smtpService] : []),
+    ...(sections.domain_certificates ? [sslCertificates] : []),
+    ...certs,
+    ...(sections.bimi ? [brand] : [])
+  ].filter(Boolean);
+  return summarize(entry.domain, checks, {
+    aggregate: aggregate?.evidence || {},
+    failure: failures || { available: false, reason: 'Mail security checks are disabled for this domain.' },
+    smtp_tls: smtpTls || { available: false, reason: 'Mail security checks are disabled for this domain.' },
+    smtp_diagnostics: smtpService?.evidence || {}
+  }, { mail_profile: mailProfile, check_sections: sections });
 }
 function demo() {
   const aggregate = { period_days: 7, total: 15234, passed: 13985, failed: 1249, pass_rate: 91.8, dkim_pass_rate: 89.7, spf_pass_rate: 96.2, passed_dkim_aligned_rate:97.7,passed_spf_aligned_rate:96.4,failed_dkim_aligned_rate:0,failed_spf_aligned_rate:0, reporters:[{name:'Example Receiver',domain:'example.net',reports:7,messages:10200,last_report:'2026-09-02T23:59:59Z'},{name:'Mailbox Provider',domain:'mail.example.org',reports:6,messages:5034,last_report:'2026-09-02T23:59:59Z'}], timeline: [{date:'2026-08-27',total:1820,failed:180},{date:'2026-08-28',total:2110,failed:220},{date:'2026-08-29',total:1984,failed:175},{date:'2026-08-30',total:2400,failed:164},{date:'2026-08-31',total:2290,failed:190},{date:'2026-09-01',total:2510,failed:200},{date:'2026-09-02',total:2120,failed:120}], top_failing_sources:[{ip:'192.0.2.10',fqdn:'outbound.example.net',network_owner:'Example Mail',messages:620},{ip:'198.51.100.8',fqdn:'relay.example.org',messages:381}] };
@@ -1404,4 +1515,4 @@ const server = http.createServer(async (req,res) => {
 });
 function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`DomainPosture listening on :${PORT}`); addDiagnosticEvent('domainposture', 'info', 'DomainPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeControlExceptions, normalizeSmtpProfiles, normalizeCertificateChecks, normalizeNotifications, validDiscordWebhookUrl, discordWebhookConfiguration, activeBimiException, applyMissingControlException, isMissingMtaSts, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, domainScore, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, certificate, domainCertificateComponent, processNotifications, sameOriginRequest, refresh, getOperationalState, getSnapshot:()=>snapshot };
+module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeControlExceptions, normalizeSmtpProfiles, normalizeCertificateChecks, normalizeCheckSections, normalizeNotifications, validDiscordWebhookUrl, discordWebhookConfiguration, decodeSecretsKey, encryptSecrets, decryptSecrets, encryptedSecretsDocument, secretsStorageStatus, activeBimiException, applyMissingControlException, isMissingMtaSts, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, domainScore, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, certificate, domainCertificateComponent, processNotifications, sameOriginRequest, refresh, getOperationalState, getSnapshot:()=>snapshot };
