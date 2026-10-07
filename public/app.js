@@ -2,7 +2,7 @@
 
 const $ = selector => document.querySelector(selector);
 const storedDomainSort = localStorage.getItem('domainposture-domain-sort') || localStorage.getItem('mailposture-domain-sort');
-const state = { data: null, system: null, logs: [], serviceLogs: null, selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/', domainSort: storedDomainSort === 'alphabetical' ? 'alphabetical' : 'priority', editingDiscordWebhook: false };
+const state = { data: null, system: null, logs: [], serviceLogs: null, selected: 0, settings: null, settingsLoaded: false, editor: null, route: '/', domainSort: storedDomainSort === 'alphabetical' ? 'alphabetical' : 'priority', editingDiscordWebhook: false, backgroundRefreshTimer: null };
 const names = { critical: 'Needs action', warning: 'Review', healthy: 'Healthy', info: 'Info', ignored: 'Ignored' };
 const themeQuery = matchMedia('(prefers-color-scheme: dark)');
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]);
@@ -148,21 +148,44 @@ function smtpDiagnosticsCard(report, id = '') {
   const endpointCards = endpoints.map(endpoint => {
     const tests = (endpoint.tests || []).map(test => `<div class="smtp-test ${esc(test.status)}"><span>${statusSymbol(test.status)}</span><div><strong>${esc(test.label)}</strong><small>${esc(test.detail)}</small></div><b>${esc(test.value)}</b></div>`).join('');
     const transcript = endpoint.transcript?.length ? `<details class="smtp-transcript"><summary>Session transcript</summary><p>The probe uses reserved example addresses and stops before DATA. No message content is sent.</p><pre>${esc(endpoint.transcript.join('\n'))}</pre></details>` : '';
-    return `<section class="smtp-endpoint"><div class="smtp-endpoint-heading"><div><strong>${esc(endpoint.host)}:${number(endpoint.port || 25)}</strong><span>${esc(endpoint.ip_address || 'Address unavailable')}</span></div><span class="state ${esc(endpoint.status)}">${esc(names[endpoint.status] || endpoint.status)}</span></div><div class="smtp-tests">${tests}</div>${transcript}</section>`;
+    const probeNote = endpoint.rate_limited && endpoint.next_probe_at ? ` · Next probe after ${new Date(endpoint.next_probe_at).toLocaleString()}` : endpoint.probe_cached ? ' · Reused cached probe' : endpoint.probe_shared ? ' · Shared probe result' : '';
+    return `<section class="smtp-endpoint"><div class="smtp-endpoint-heading"><div><strong>${esc(endpoint.host)}:${number(endpoint.port || 25)}</strong><span>${esc(endpoint.ip_address || 'Address unavailable')}${esc(probeNote)}</span></div><span class="state ${esc(endpoint.status)}">${esc(names[endpoint.status] || endpoint.status)}</span></div><div class="smtp-tests">${tests}</div>${transcript}</section>`;
   }).join('');
   const profile = report.profile || {};
   return `<article${reportId(id)} class="report-card wide"><div class="report-card-header"><div><h3>MX endpoint results</h3><p>Connection, SMTP identity, STARTTLS, and relay protection for each published MX host.</p></div></div>${mailProfileMarkup(profile)}<p class="report-explanation">PTR and banner names on managed infrastructure may differ from the customer-facing MX name. Slow timing from this single monitoring location is advisory. The relay probe never sends DATA or message content; acceptance is conclusive only from a configured external, untrusted location.</p><div class="smtp-endpoints">${endpointCards}</div></article>`;
 }
 
-function detailCards(reports, configuredSections = {}) {
+function dnsValue(value) {
+  if (typeof value === 'string') return value;
+  if (value?.address) return `${value.address}${value.ttl !== null && value.ttl !== undefined ? ` · TTL ${value.ttl}s` : ''}`;
+  if (value?.exchange) return `${value.priority} ${value.exchange}`;
+  if (value?.nsname) return `${value.nsname} · ${value.hostmaster} · serial ${value.serial} · refresh ${value.refresh}s · retry ${value.retry}s · expire ${value.expire}s · minimum ${value.minttl}s`;
+  if (value?.critical !== undefined && value?.issue) return `${value.critical} ${value.issue} ${value.value}`;
+  return JSON.stringify(value);
+}
+
+function dnsMonitoringCard(report) {
+  const records = report?.records || [];
+  if (!records.length) return '';
+  const rows = records.map(record => {
+    const stateLabel = { baseline: 'Baseline saved', unchanged: 'Unchanged', pending: `Change pending ${record.confirmations_observed || 1}/${report.confirmation_runs || 2}`, changed: 'Change confirmed', notification_failed: 'Notification retry pending', unavailable: 'Lookup unavailable' }[record.change_state] || (record.status === 'missing' ? 'No record' : 'Observed');
+    const stateClass = record.change_state === 'unavailable' || record.change_state === 'notification_failed' ? 'warning' : record.change_state === 'changed' || record.change_state === 'pending' ? 'info' : 'healthy';
+    const values = record.status === 'unavailable' ? record.error : record.values?.length ? record.values.map(dnsValue).join(' · ') : 'No record published';
+    return `<div class="dns-monitor-row"><span>${statusSymbol(stateClass)}</span><div><strong>${esc(record.host)} <b>${esc(record.type)}</b></strong><small>${esc(values)}</small></div><em class="state ${stateClass}">${esc(stateLabel)}</em></div>`;
+  }).join('');
+  return `<article class="report-card wide dns-monitoring-card"><div class="report-card-header"><div><h3>DNS change monitoring</h3><p>Operational record baselines and confirmed changes. These results do not affect the posture score.</p></div></div><div class="dns-monitor-rows">${rows}</div></article>`;
+}
+
+function detailCards(reports, configuredSections = {}, dnsMonitoringEnabled = false) {
   const sections = { domain_certificates: true, additional_tls: true, smtp: true, dkim: true, mail_security: true, bimi: true, ...configuredSections };
   const mailReports = sections.mail_security ? `${aggregateCard(reports?.aggregate, true, 'report-dmarc')}${smtpTlsCard(reports?.smtp_tls, 'report-smtp-tls', true)}<article id="report-dmarc-sources" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>Top failing DMARC sources</h3><p>Source addresses producing the most failed messages, with reverse-DNS names when available</p></div></div>${sourceList(reports?.aggregate?.top_failing_sources)}</article>${reportingOrganizationsCard(reports?.smtp_tls, 'report-smtp-tls-organizations')}${failureCard(reports?.failure, 'report-dmarc-failure')}<article id="report-smtp-tls-failures" tabindex="-1" class="report-card"><div class="report-card-header"><div><h3>SMTP TLS failure types</h3><p>Transport problems reported by sending services</p></div></div>${rankedList(reports?.smtp_tls?.failure_types, 'type', 'count', 'No SMTP TLS failure types were reported.')}</article>${dmarcReportersCard(reports?.aggregate, 'report-dmarc-reporters')}` : '';
   const smtpReports = sections.smtp ? `<div class="report-subheading wide"><small>Live service check</small><h3>SMTP server diagnostics</h3></div>${smtpDiagnosticsCard(reports?.smtp_diagnostics, 'report-smtp-diagnostics')}` : '';
+  const dnsMonitoring = dnsMonitoringCard(reports?.dns_monitoring);
   const labels = { domain_certificates: 'Domain certificates', additional_tls: 'Additional TLS endpoints', smtp: 'Mail hosting and SMTP probes', dkim: 'DKIM selectors', mail_security: 'Mail security review exceptions', bimi: 'BIMI review exceptions' };
-  const disabled = Object.entries(labels).filter(([key]) => !sections[key]).map(([, label]) => `<li>${esc(label)}</li>`).join('');
-  const empty = mailReports || smtpReports ? '' : '<div class="empty-state wide"><h3>No Report Center checks are enabled</h3><p>Enable mail security or SMTP probes in this domain’s settings to show report information here.</p></div>';
-  const disabledSection = disabled ? `<section class="disabled-checks wide"><small>Domain configuration</small><h3>Checks switched off</h3><p>These checks are excluded from this domain’s score and Report Center.</p><ul>${disabled}</ul></section>` : '';
-  return `${mailReports}${smtpReports}${empty}${disabledSection}`;
+  const disabled = `${Object.entries(labels).filter(([key]) => !sections[key]).map(([, label]) => `<li>${esc(label)}</li>`).join('')}${dnsMonitoringEnabled ? '' : '<li>DNS change monitoring <small>Non-scored</small></li>'}`;
+  const empty = mailReports || smtpReports || dnsMonitoring ? '' : '<div class="empty-state wide"><h3>No Report Center checks are enabled</h3><p>Enable mail security, SMTP probes, or DNS change monitoring in this domain’s settings to show report information here.</p></div>';
+  const disabledSection = disabled ? `<section class="disabled-checks wide"><small>Domain configuration</small><h3>Checks switched off</h3><p>Scored checks are excluded from the Domain Score. All listed checks are omitted from the Report Center.</p><ul>${disabled}</ul></section>` : '';
+  return `${mailReports}${smtpReports}${dnsMonitoring}${empty}${disabledSection}`;
 }
 
 function organizationReports(domains) {
@@ -283,7 +306,7 @@ function renderDomain() {
     const bimiLogo = check.id === 'bimi' && check.evidence?.logo_available ? `<img class="bimi-logo" src="/api/bimi-logo?domain=${encodeURIComponent(domain.domain)}" alt="BIMI logo for ${esc(domain.domain)}">` : '';
     return `<button class="card ${esc(check.status)}${days === null ? '' : ' tls-card'}${bimiLogo ? ' bimi-card' : ''}" data-check="${esc(check.id)}">${days === null ? '' : `<span class="certificate-days" aria-hidden="true">${number(days)}</span>`}<div class="card-content"><div class="card-top"><span><span class="label">${esc(check.label)}</span>${endpoint ? `<span class="card-context">${esc(endpoint)}</span>` : ''}</span><span class="state ${check.status}">${names[check.status]}</span></div>${bimiLogo}<h3>${esc(check.summary)}</h3><p>${esc(check.detail)}</p></div></button>`;
   }).join('');
-  $('#domain-reports').innerHTML = detailCards(domain.reports, domain.check_sections);
+  $('#domain-reports').innerHTML = detailCards(domain.reports, domain.check_sections, domain.dns_monitoring_enabled);
 }
 
 function renderStatus() {
@@ -431,12 +454,58 @@ async function loadStatus() {
   }
 }
 
+function renderLookupResults(result) {
+  const recordCards = (result.dns || []).map(record => {
+    const available = record.status === 'available';
+    const value = record.status === 'unavailable' ? record.error : available ? record.values.map(dnsValue).join('\n') : 'No record found';
+    return `<article class="lookup-card ${record.status}"><div><strong>${esc(record.type)}</strong><span>${esc(record.queried_name)}</span></div><pre>${esc(value)}</pre></article>`;
+  }).join('');
+  const tls = result.tls_rpt ? `<article class="lookup-summary-card ${esc(result.tls_rpt.status)}"><div>${statusSymbol(result.tls_rpt.status)}</div><section><small>TLS-RPT validation</small><h2>${esc(result.tls_rpt.summary)}</h2><p>${esc(result.tls_rpt.detail)}</p>${result.tls_rpt.evidence?.record ? `<pre>${esc(result.tls_rpt.evidence.record)}</pre>` : ''}</section></article>` : '';
+  const reputation = result.reputation || {};
+  const reputationChecks = (reputation.evidence?.checks || []).map(check => `<div class="lookup-reputation-row"><span>${statusSymbol(check.status === 'listed' ? 'warning' : check.status === 'clean' ? 'healthy' : 'info')}</span><strong>${esc(check.provider)}</strong><code>${esc(check.target)}</code><em>${esc(check.status)}</em></div>`).join('');
+  const reputationCard = `<article class="lookup-summary-card ${esc(reputation.status || 'info')}"><div>${statusSymbol(reputation.status || 'info')}</div><section><small>Reputation screening</small><h2>${esc(reputation.summary || 'Unavailable')}</h2><p>${esc(reputation.detail || '')}</p>${reputationChecks ? `<div class="lookup-reputation">${reputationChecks}</div>` : ''}</section></article>`;
+  $('#lookup-results').innerHTML = `<div class="lookup-result-heading"><div><small>Lookup result</small><h2>${esc(result.target)}</h2></div><span>${result.cached ? 'Cached result' : result.shared ? 'Shared active lookup' : `Checked ${new Date(result.checked_at).toLocaleString()}`}</span></div><div class="lookup-summary-grid">${tls}${reputationCard}</div><div class="lookup-record-grid">${recordCards}</div>`;
+}
+
+async function runLookup(event) {
+  event.preventDefault();
+  const button = $('#lookup-form button[type="submit"]');
+  const message = $('#lookup-message');
+  button.disabled = true;
+  button.textContent = 'Looking up…';
+  message.textContent = 'Querying DNS and available reputation providers…';
+  $('#lookup-results').innerHTML = '<div class="clear">Running lookup…</div>';
+  try {
+    const response = await fetch('/api/tools/lookup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target: $('#lookup-target').value.trim() }) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Unable to complete the lookup.');
+    renderLookupResults(result);
+    message.textContent = result.cached ? 'A recent cached result is shown.' : 'Lookup complete. An unavailable provider is not treated as a clean result.';
+  } catch (error) {
+    $('#lookup-results').innerHTML = `<div class="error">${esc(error.message)}</div>`;
+    message.textContent = 'Lookup failed.';
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Run lookup';
+  }
+}
+
+function followBackgroundRefresh(previousGeneratedAt, attempt = 0) {
+  clearTimeout(state.backgroundRefreshTimer);
+  state.backgroundRefreshTimer = setTimeout(async () => {
+    await loadStatus();
+    if (attempt < 60 && (state.data?.refreshing || state.data?.generated_at === previousGeneratedAt)) followBackgroundRefresh(previousGeneratedAt, attempt + 1);
+  }, 1000);
+}
+
 function renderSettingsDomains() {
   const settings = state.settings;
   if (!settings) return;
   $('#settings-domain-list').innerHTML = settings.monitored_domains.length ? settings.monitored_domains.map((domain, index) => {
     const selectors = settings.dkim_selectors[domain] || [];
     const endpoints = settings.tls_endpoints[domain] || [];
+    const dnsMonitors = settings.dns_monitors?.[domain] || [];
+    const dnsMonitoringEnabled = settings.dns_monitoring_enabled?.[domain] === true;
     const smtpProfile = settings.smtp_profiles?.[domain] || { hosting_type: 'auto', provider: 'auto' };
     const sections = { domain_certificates: true, additional_tls: true, smtp: true, dkim: true, mail_security: true, bimi: true, ...(settings.check_sections?.[domain] || {}) };
     const certificate = settings.certificate_checks?.[domain] || { check_public: true, check_origin: false, origin_ip: '' };
@@ -449,7 +518,8 @@ function renderSettingsDomains() {
     const mailNote = !sections.smtp ? 'SMTP probes off' : detectedProfile ? mailProfileText(detectedProfile) : `Hosting type: ${hostingLabels[smtpProfile.hosting_type] || 'Automatic'} (${smtpProfile.hosting_type === 'auto' ? 'Auto-detected' : 'Selected'}) · Provider: ${providerLabels[smtpProfile.provider] || 'Automatic'} (${smtpProfile.provider === 'auto' ? 'Auto-detected' : 'Selected'})`;
     const certificateNote = sections.domain_certificates ? `${certificate.check_public ? 'Public certificate' : ''}${certificate.check_public && certificate.check_origin ? ' + ' : ''}${certificate.check_origin ? `Origin certificate (${certificate.origin_ip})` : ''}` : 'Certificate checks off';
     const enabledCount = Object.values(sections).filter(Boolean).length;
-    return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${enabledCount} of 6 check sections enabled · ${esc(mailNote)} · ${esc(certificateNote)} · ${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} additional TLS endpoint${endpoints.length === 1 ? '' : 's'}${esc(exceptionNote)}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
+    const dnsNote = dnsMonitoringEnabled ? `${dnsMonitors.length} DNS record monitor${dnsMonitors.length === 1 ? '' : 's'}` : `DNS monitoring off${dnsMonitors.length ? ` (${dnsMonitors.length} saved)` : ''}`;
+    return `<div class="editable-row"><div><strong>${esc(domain)}</strong><span>${enabledCount} of 6 scored sections enabled · ${esc(mailNote)} · ${esc(certificateNote)} · ${selectors.length} DKIM selector${selectors.length === 1 ? '' : 's'} · ${endpoints.length} additional TLS endpoint${endpoints.length === 1 ? '' : 's'} · ${esc(dnsNote)}${esc(exceptionNote)}</span></div><div class="row-actions"><button class="symbol-button" type="button" data-edit-domain="${index}" aria-label="Edit ${esc(domain)}" title="Edit domain">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-domain="${index}" aria-label="Remove ${esc(domain)}" title="Remove domain">−</button></div></div>`;
   }).join('') : '<div class="empty-list"><p>No domains are configured.</p><button type="button" data-add-domain>Add a domain</button></div>';
 }
 
@@ -496,10 +566,13 @@ async function loadSettings() {
   $('#refresh-minutes').value = settings.refresh_minutes;
   $('#certificate-check-minutes').value = settings.certificate_check_minutes;
   $('#request-timeout').value = settings.request_timeout_ms;
+  $('#smtp-probe-cooldown').value = settings.smtp_probe_cooldown_minutes;
   $('#discord-enabled').checked = settings.notifications.discord_enabled;
   $('#ssl-notifications-enabled').checked = settings.notifications.ssl_enabled;
   $('#attention-notifications-enabled').checked = settings.notifications.needs_attention_enabled;
+  $('#dns-notifications-enabled').checked = settings.notifications.dns_changes_enabled;
   $('#ssl-warning-threshold').value = settings.notifications.ssl_warning_threshold;
+  $('#dns-change-confirmations').value = settings.dns_change_confirmations;
   $('#discord-webhook').value = '';
   state.editingDiscordWebhook = false;
   renderDiscordWebhookSettings(settings);
@@ -593,6 +666,7 @@ function renderEditorLists() {
   const editor = state.editor;
   $('#selector-list').innerHTML = editor.selectors.length ? editor.selectors.map((selector, index) => `<div class="editable-row small-row"><code>${esc(selector)}</code><div class="row-actions"><button class="symbol-button" type="button" data-edit-selector="${index}" aria-label="Edit selector ${esc(selector)}" title="Edit selector">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-selector="${index}" aria-label="Remove selector ${esc(selector)}" title="Remove selector">−</button></div></div>`).join('') : '<p class="empty-inline">No selectors added.</p>';
   $('#endpoint-list').innerHTML = editor.endpoints.length ? editor.endpoints.map((endpoint, index) => `<div class="editable-row small-row"><code>${esc(endpoint.host)}:${endpoint.port}</code><div class="row-actions"><button class="symbol-button" type="button" data-edit-endpoint="${index}" aria-label="Edit endpoint ${esc(endpoint.host)} port ${endpoint.port}" title="Edit endpoint">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-endpoint="${index}" aria-label="Remove endpoint ${esc(endpoint.host)} port ${endpoint.port}" title="Remove endpoint">−</button></div></div>`).join('') : '<p class="empty-inline">No TLS certificates added.</p>';
+  $('#dns-monitor-list').innerHTML = editor.dnsMonitors.length ? editor.dnsMonitors.map((monitor, index) => `<div class="editable-row small-row"><code>${esc(monitor.host)} ${esc(monitor.type)}</code><div class="row-actions"><button class="symbol-button" type="button" data-edit-dns-monitor="${index}" aria-label="Edit ${esc(monitor.host)} ${esc(monitor.type)} monitor" title="Edit DNS monitor">✎</button><button class="symbol-button danger-symbol" type="button" data-remove-dns-monitor="${index}" aria-label="Remove ${esc(monitor.host)} ${esc(monitor.type)} monitor" title="Remove DNS monitor">−</button></div></div>`).join('') : '<p class="empty-inline">No DNS records are monitored.</p>';
 }
 
 function openDomainEditor(index = null) {
@@ -608,6 +682,7 @@ function openDomainEditor(index = null) {
     originalDomain: domain,
     selectors: clone(state.settings.dkim_selectors[domain] || []),
     endpoints: clone(state.settings.tls_endpoints[domain] || []),
+    dnsMonitors: clone(state.settings.dns_monitors?.[domain] || []),
     certificateChecks,
     checkSections,
     smtpProfile,
@@ -616,7 +691,8 @@ function openDomainEditor(index = null) {
     controlExceptionsOriginal: { mta_sts: controlExceptions.mta_sts || null, tls_certificates: controlExceptions.tls_certificates || null },
     controlExceptionDirty: { mta_sts: false },
     editingSelector: null,
-    editingEndpoint: null
+    editingEndpoint: null,
+    editingDnsMonitor: null
   };
   $('#domain-editor-title').textContent = index === null ? 'Add domain' : 'Edit domain';
   $('#domain-name').value = domain;
@@ -638,6 +714,10 @@ function openDomainEditor(index = null) {
   $('#endpoint-host').value = '';
   $('#endpoint-port').value = '443';
   $('#endpoint-add').textContent = '＋';
+  $('#dns-monitoring-enabled').checked = state.settings.dns_monitoring_enabled?.[domain] === true;
+  $('#dns-monitor-host').value = domain;
+  $('#dns-monitor-type').value = 'A';
+  $('#dns-monitor-add').textContent = '＋';
   setBimiExceptionFields('self_asserted', '#bimi-ignore-mode', '#bimi-ignore-months');
   setBimiExceptionFields('no_logo', '#bimi-no-logo-ignore-mode', '#bimi-no-logo-ignore-months');
   setControlExceptionFields('mta_sts', '#mta-sts-ignore-mode', '#mta-sts-ignore-months');
@@ -648,6 +728,7 @@ function openDomainEditor(index = null) {
   updateMailHostingFields();
   updateOriginCertificateVisibility();
   updateDomainSectionVisibility();
+  updateDnsMonitoringVisibility();
   $('#domain-dialog').showModal();
 }
 
@@ -668,6 +749,10 @@ function updateDomainSectionVisibility() {
 
 function updateOriginCertificateVisibility() {
   $('#origin-ip-field').hidden = !$('#check-origin-certificate').checked;
+}
+
+function updateDnsMonitoringVisibility() {
+  $('#dns-monitoring-settings').hidden = !$('#dns-monitoring-enabled').checked;
 }
 
 function updateMailHostingFields() {
@@ -766,6 +851,24 @@ function addEndpoint() {
   renderEditorLists();
 }
 
+function addDnsMonitor() {
+  const host = $('#dns-monitor-host').value.trim().toLowerCase().replace(/\.$/, '');
+  const type = $('#dns-monitor-type').value;
+  if (!/^(?=.{1,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(host)) return showDomainError('Enter a valid fully qualified host name for DNS monitoring.');
+  if (state.editor.dnsMonitors.length >= 20 && state.editor.editingDnsMonitor === null) return showDomainError('DNS monitoring is limited to 20 records per domain.');
+  const duplicate = state.editor.dnsMonitors.findIndex((value, index) => value.host === host && value.type === type && index !== state.editor.editingDnsMonitor);
+  if (duplicate >= 0) return showDomainError('That DNS record is already monitored.');
+  const monitor = { host, type };
+  if (state.editor.editingDnsMonitor === null) state.editor.dnsMonitors.push(monitor);
+  else state.editor.dnsMonitors[state.editor.editingDnsMonitor] = monitor;
+  state.editor.editingDnsMonitor = null;
+  $('#dns-monitor-host').value = '';
+  $('#dns-monitor-type').value = 'A';
+  $('#dns-monitor-add').textContent = '＋';
+  showDomainError('');
+  renderEditorLists();
+}
+
 function showDomainError(message) { $('#domain-message').textContent = message; }
 
 function saveDomain(event) {
@@ -791,6 +894,7 @@ function saveDomain(event) {
   const looksLikeIpv4 = /^(?:\d{1,3}\.){3}\d{1,3}$/.test(originIp) && originIp.split('.').every(part => Number(part) <= 255);
   const looksLikeIpv6 = /^[0-9a-f:]+$/i.test(originIp) && originIp.includes(':');
   if (checkSections.domain_certificates && checkOrigin && !looksLikeIpv4 && !looksLikeIpv6) return showDomainError('Enter a valid origin IPv4 or IPv6 address.');
+  if ($('#dns-monitoring-enabled').checked && !state.editor.dnsMonitors.length) return showDomainError('Add at least one DNS record to monitor, or switch off DNS change monitoring.');
   const expectedHostname = $('#smtp-expected-host').value.trim().toLowerCase().replace(/\.$/, '');
   if (expectedHostname && !/^(?=.{1,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(expectedHostname)) return showDomainError('Enter a valid expected SMTP hostname or leave it blank.');
   let selfAssertedException; let noLogoException; let mtaStsException;
@@ -811,6 +915,8 @@ function saveDomain(event) {
     if (state.settings.smtp_profiles) delete state.settings.smtp_profiles[oldDomain];
     if (state.settings.bimi_exceptions) delete state.settings.bimi_exceptions[oldDomain];
     if (state.settings.control_exceptions) delete state.settings.control_exceptions[oldDomain];
+    if (state.settings.dns_monitoring_enabled) delete state.settings.dns_monitoring_enabled[oldDomain];
+    if (state.settings.dns_monitors) delete state.settings.dns_monitors[oldDomain];
   }
   state.settings.dkim_selectors[domain] = clone(state.editor.selectors);
   state.settings.tls_endpoints[domain] = clone(state.editor.endpoints);
@@ -827,6 +933,10 @@ function saveDomain(event) {
   const legacyTlsCertificateException = state.editor.controlExceptionsOriginal.tls_certificates;
   if (mtaStsException || legacyTlsCertificateException) state.settings.control_exceptions[domain] = { ...(mtaStsException ? { mta_sts: mtaStsException } : {}), ...(legacyTlsCertificateException ? { tls_certificates: legacyTlsCertificateException } : {}) };
   else delete state.settings.control_exceptions[domain];
+  state.settings.dns_monitoring_enabled ||= {};
+  state.settings.dns_monitoring_enabled[domain] = $('#dns-monitoring-enabled').checked;
+  state.settings.dns_monitors ||= {};
+  state.settings.dns_monitors[domain] = clone(state.editor.dnsMonitors);
   $('#domain-dialog').close();
   renderSettingsDomains();
   $('#settings-message').textContent = 'Domain changes are ready. Save settings to apply them.';
@@ -841,6 +951,7 @@ async function saveSettings(event) {
   button.disabled = true;
   button.textContent = 'Saving…';
   message.className = '';
+  const previousGeneratedAt = state.data?.generated_at || null;
   try {
     const body = {
       ...state.settings,
@@ -848,10 +959,13 @@ async function saveSettings(event) {
       refresh_minutes: Number($('#refresh-minutes').value),
       certificate_check_minutes: Number($('#certificate-check-minutes').value),
       request_timeout_ms: Number($('#request-timeout').value),
+      smtp_probe_cooldown_minutes: Number($('#smtp-probe-cooldown').value),
+      dns_change_confirmations: Number($('#dns-change-confirmations').value),
       notifications: {
         discord_enabled: $('#discord-enabled').checked,
         ssl_enabled: $('#ssl-notifications-enabled').checked,
         needs_attention_enabled: $('#attention-notifications-enabled').checked,
+        dns_changes_enabled: $('#dns-notifications-enabled').checked,
         ssl_warning_threshold: Number($('#ssl-warning-threshold').value),
         discord_webhook: $('#discord-webhook').value.trim()
       },
@@ -936,14 +1050,15 @@ async function saveSettings(event) {
     renderDiscordWebhookSettings(result);
     $('#imap-password').value = '';
     $('#imap-password-status').textContent = result.mailbox.password_set ? 'A password is saved. Leave this blank to keep it.' : 'No password is saved.';
-    message.textContent = result.snapshot_notice || (result.parsedmarc_reload_automatic
+    const savedMessage = result.snapshot_notice || (result.parsedmarc_reload_automatic
       ? `Settings saved. parsedmarc will reload the active configuration within ${result.parsedmarc_reload_seconds} seconds.`
       : result.report_source === 'external'
         ? 'Settings saved and parsedmarc configuration written. Restart the external parsedmarc service to apply it.'
         : 'Settings saved. Historical report collection is disabled.');
+    message.textContent = `${savedMessage} Monitoring checks are refreshing in the background.`;
     message.className = result.snapshot_notice ? 'pending' : 'success';
     renderSettingsDomains();
-    await loadStatus();
+    followBackgroundRefresh(previousGeneratedAt);
   } catch (error) {
     message.textContent = error.message;
     message.className = 'failure';
@@ -954,7 +1069,7 @@ async function saveSettings(event) {
 }
 
 function normalizedRoute(pathname) {
-  return ['/', '/domains', '/status', '/settings', '/help'].includes(pathname) ? pathname : '/';
+  return ['/', '/domains', '/tools', '/status', '/settings', '/help'].includes(pathname) ? pathname : '/';
 }
 
 async function showRoute(pathname, push = false) {
@@ -962,11 +1077,11 @@ async function showRoute(pathname, push = false) {
   state.route = route;
   $('#domain-menu-list').hidden = true;
   $('#domain-menu-button').setAttribute('aria-expanded', 'false');
-  document.title = `${{ '/': 'Dashboard', '/domains': 'Domains', '/status': 'System Status', '/settings': 'Settings', '/help': 'Help' }[route]} · DomainPosture`;
+  document.title = `${{ '/': 'Dashboard', '/domains': 'Domains', '/tools': 'Lookup Center', '/status': 'System Status', '/settings': 'Settings', '/help': 'Help' }[route]} · DomainPosture`;
   if (push) history.pushState({}, '', route);
-  const viewByRoute = { '/': '#dashboard-view', '/domains': '#domains-view', '/status': '#system-status-view', '/settings': '#settings-view', '/help': '#help-view' };
+  const viewByRoute = { '/': '#dashboard-view', '/domains': '#domains-view', '/tools': '#tools-view', '/status': '#system-status-view', '/settings': '#settings-view', '/help': '#help-view' };
   Object.values(viewByRoute).forEach(selector => { $(selector).hidden = selector !== viewByRoute[route]; });
-  const quiet = ['/settings', '/help'].includes(route);
+  const quiet = ['/tools', '/settings', '/help'].includes(route);
   $('#refresh').hidden = quiet;
   $('#updated').hidden = quiet;
   document.querySelectorAll('[data-route]').forEach(link => {
@@ -1000,6 +1115,7 @@ $('#refresh').onclick = async () => {
 
 $('#settings-form').addEventListener('submit', saveSettings);
 $('#domain-form').addEventListener('submit', saveDomain);
+$('#lookup-form').addEventListener('submit', runLookup);
 document.querySelectorAll('input[type="checkbox"]').forEach(input => input.setAttribute('role', 'switch'));
 function showSecretsRecoveryKey(result, rotated = false) {
   state.settings.secrets_key = { configured: true, source: result.source, can_generate: false, can_rotate: result.source === 'managed' };
@@ -1092,6 +1208,7 @@ $('#secrets-key-dialog').addEventListener('cancel', event => {
 $('#add-domain').onclick = () => openDomainEditor();
 $('#selector-add').onclick = addSelector;
 $('#endpoint-add').onclick = addEndpoint;
+$('#dns-monitor-add').onclick = addDnsMonitor;
 document.querySelectorAll('.domain-cancel').forEach(button => { button.onclick = () => $('#domain-dialog').close(); });
 document.querySelectorAll('input[name="theme"]').forEach(input => { input.onchange = () => setTheme(input.value); });
 document.querySelectorAll('input[name="domain-sort"]').forEach(input => { input.onchange = () => setDomainSort(input.value); });
@@ -1107,6 +1224,7 @@ $('#report-source').onchange = updateSettingsVisibility;
 $('#mailbox-enabled').onchange = updateSettingsVisibility;
 $('#snapshots-enabled').onchange = updateSettingsVisibility;
 $('#check-origin-certificate').onchange = updateOriginCertificateVisibility;
+$('#dns-monitoring-enabled').onchange = updateDnsMonitoringVisibility;
 ['#section-domain-certificates', '#section-additional-tls', '#section-smtp', '#section-dkim', '#section-mail-security', '#section-bimi'].forEach(selector => {
   $(selector).onchange = updateDomainSectionVisibility;
 });
@@ -1210,6 +1328,8 @@ document.onclick = async event => {
     if (state.settings.check_sections) delete state.settings.check_sections[removed];
     if (state.settings.bimi_exceptions) delete state.settings.bimi_exceptions[removed];
     if (state.settings.control_exceptions) delete state.settings.control_exceptions[removed];
+    if (state.settings.dns_monitoring_enabled) delete state.settings.dns_monitoring_enabled[removed];
+    if (state.settings.dns_monitors) delete state.settings.dns_monitors[removed];
     renderSettingsDomains();
     $('#settings-message').textContent = `${removed} was removed. Save settings to apply this change.`;
     $('#settings-message').className = 'pending';
@@ -1238,7 +1358,20 @@ document.onclick = async event => {
     return;
   }
   const removeEndpoint = event.target.closest('[data-remove-endpoint]');
-  if (removeEndpoint) { state.editor.endpoints.splice(Number(removeEndpoint.dataset.removeEndpoint), 1); state.editor.editingEndpoint = null; $('#endpoint-host').value = ''; $('#endpoint-port').value = '443'; $('#endpoint-add').textContent = '＋'; renderEditorLists(); }
+  if (removeEndpoint) { state.editor.endpoints.splice(Number(removeEndpoint.dataset.removeEndpoint), 1); state.editor.editingEndpoint = null; $('#endpoint-host').value = ''; $('#endpoint-port').value = '443'; $('#endpoint-add').textContent = '＋'; renderEditorLists(); return; }
+  const editDnsMonitor = event.target.closest('[data-edit-dns-monitor]');
+  if (editDnsMonitor) {
+    const index = Number(editDnsMonitor.dataset.editDnsMonitor);
+    const monitor = state.editor.dnsMonitors[index];
+    state.editor.editingDnsMonitor = index;
+    $('#dns-monitor-host').value = monitor.host;
+    $('#dns-monitor-type').value = monitor.type;
+    $('#dns-monitor-host').focus();
+    $('#dns-monitor-add').textContent = '✓';
+    return;
+  }
+  const removeDnsMonitor = event.target.closest('[data-remove-dns-monitor]');
+  if (removeDnsMonitor) { state.editor.dnsMonitors.splice(Number(removeDnsMonitor.dataset.removeDnsMonitor), 1); state.editor.editingDnsMonitor = null; $('#dns-monitor-host').value = ''; $('#dns-monitor-type').value = 'A'; $('#dns-monitor-add').textContent = '＋'; renderEditorLists(); }
 };
 
 window.onpopstate = () => showRoute(location.pathname);
@@ -1255,6 +1388,7 @@ $('#domain-dialog').onclick = event => { if (event.target === $('#domain-dialog'
 $('#selector-input').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); addSelector(); } };
 $('#endpoint-host').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); addEndpoint(); } };
 $('#endpoint-port').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); addEndpoint(); } };
+$('#dns-monitor-host').onkeydown = event => { if (event.key === 'Enter') { event.preventDefault(); addDnsMonitor(); } };
 
 setTheme(localStorage.getItem('domainposture-theme') || localStorage.getItem('mailposture-theme') || 'system', false);
 setDomainSort(state.domainSort, false);

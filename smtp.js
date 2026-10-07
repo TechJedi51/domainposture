@@ -9,6 +9,10 @@ const CONNECTION_WARNING_MS = 5000;
 const CONNECTION_CRITICAL_MS = 15000;
 const TRANSACTION_WARNING_MS = 5000;
 const TRANSACTION_CRITICAL_MS = 15000;
+const DEFAULT_SMTP_PROBE_CONCURRENCY = 2;
+const DEFAULT_SMTP_PROBE_COOLDOWN_MS = 30 * 60 * 1000;
+const DEFAULT_SMTP_PROBE_BACKOFF_MS = 15 * 60 * 1000;
+const DEFAULT_SMTP_PROBE_MAX_BACKOFF_MS = 4 * 60 * 60 * 1000;
 const PROVIDER_LABELS = { kerio: 'Kerio Connect', google: 'Google Workspace', microsoft: 'Microsoft 365', hover: 'Hover Mail', icloud: 'iCloud Mail', self_hosted: 'Self-hosted', other: 'Other provider', none: 'None' };
 const PROVIDERS = new Set(['auto', 'kerio', 'google', 'microsoft', 'hover', 'icloud', 'self_hosted', 'other']);
 
@@ -250,7 +254,11 @@ async function probeSmtp(host, options = {}) {
     evidence.greeting_code = greeting.code;
     evidence.banner = safeLine(greeting.lines[0]);
     evidence.banner_hostname = smtpBannerHostname(greeting.lines);
-    if (greeting.code !== 220) throw new Error(`SMTP greeting returned ${greeting.code}`);
+    if (greeting.code !== 220) {
+      evidence.temporary_failure = greeting.code >= 400 && greeting.code < 500;
+      evidence.rate_limited = greeting.code === 421;
+      throw new Error(`SMTP greeting returned ${greeting.code}: ${safeLine(greeting.lines.join(' '))}`);
+    }
 
     let hello = await reader.command(`EHLO ${evidence.ehlo_identity}`);
     if (hello.code >= 500) hello = await reader.command(`HELO ${evidence.ehlo_identity}`);
@@ -306,12 +314,82 @@ async function probeSmtp(host, options = {}) {
     reader?.cleanup();
     socket?.destroy();
   }
+  evidence.checked_at = new Date().toISOString();
   Object.assign(evidence, await reverseIdentity(evidence.ip_address, options.resolver || dns));
   evidence.ptr_matches_host = evidence.reverse_dns.includes(evidence.host);
   evidence.reverse_dns_match = evidence.ptr_matches_host && evidence.forward_confirmed;
   evidence.banner_matches_reverse_dns = Boolean(evidence.banner_hostname && evidence.reverse_dns.includes(evidence.banner_hostname));
   return evidence;
 }
+
+function cloneProbeEvidence(evidence) {
+  return { ...evidence, transcript: [...(evidence.transcript || [])], reverse_dns: [...(evidence.reverse_dns || [])] };
+}
+
+function createSmtpProbeCoordinator(options = {}) {
+  const concurrency = Math.max(1, Math.round(Number(options.concurrency || DEFAULT_SMTP_PROBE_CONCURRENCY)));
+  const defaultCooldownMs = Math.max(1000, Number(options.cooldown_ms || DEFAULT_SMTP_PROBE_COOLDOWN_MS));
+  const baseBackoffMs = Math.max(1000, Number(options.backoff_ms || DEFAULT_SMTP_PROBE_BACKOFF_MS));
+  const maxBackoffMs = Math.max(baseBackoffMs, Number(options.max_backoff_ms || DEFAULT_SMTP_PROBE_MAX_BACKOFF_MS));
+  const jitterRatio = Math.max(0, Math.min(.5, Number(options.jitter_ratio ?? .2)));
+  const now = options.now || Date.now;
+  const random = options.random || Math.random;
+  const executeProbe = options.probe || probeSmtp;
+  const cache = new Map();
+  const inFlight = new Map();
+  const queue = [];
+  let active = 0;
+
+  const enqueue = task => new Promise((resolve, reject) => {
+    queue.push({ task, resolve, reject });
+    const drain = () => {
+      while (active < concurrency && queue.length) {
+        const next = queue.shift();
+        active += 1;
+        Promise.resolve().then(next.task).then(next.resolve, next.reject).finally(() => { active -= 1; drain(); });
+      }
+    };
+    drain();
+  });
+
+  const cachedEvidence = (entry, extra = {}) => ({
+    ...cloneProbeEvidence(entry.evidence),
+    probe_cached: true,
+    next_probe_at: new Date(entry.nextProbeAt).toISOString(),
+    ...extra
+  });
+
+  const probe = (host, probeOptions = {}) => {
+    const key = `${normalizedHost(host)}:${Number(probeOptions.port || 25)}:${normalizedHost(probeOptions.ehlo_hostname || '')}`;
+    const existing = cache.get(key);
+    if (existing && now() < existing.nextProbeAt) return Promise.resolve(cachedEvidence(existing));
+    if (inFlight.has(key)) return inFlight.get(key).then(evidence => ({ ...cloneProbeEvidence(evidence), probe_shared: true }));
+
+    const operation = enqueue(async () => {
+      const latest = cache.get(key);
+      if (latest && now() < latest.nextProbeAt) return cachedEvidence(latest);
+      const evidence = await executeProbe(host, probeOptions);
+      const rateLimitCount = evidence.rate_limited ? (latest?.rateLimitCount || 0) + 1 : 0;
+      const cooldownMs = Math.max(1000, Number(probeOptions.cooldown_ms || defaultCooldownMs));
+      const backoffMs = evidence.rate_limited ? Math.min(maxBackoffMs, baseBackoffMs * (2 ** Math.max(0, rateLimitCount - 1))) : cooldownMs;
+      const jitterMs = evidence.rate_limited ? Math.round(backoffMs * jitterRatio * random()) : 0;
+      const nextProbeAt = now() + backoffMs + jitterMs;
+      const stored = { evidence: cloneProbeEvidence(evidence), nextProbeAt, rateLimitCount };
+      cache.set(key, stored);
+      return { ...cloneProbeEvidence(evidence), probe_cached: false, next_probe_at: new Date(nextProbeAt).toISOString() };
+    }).finally(() => inFlight.delete(key));
+    inFlight.set(key, operation);
+    return operation;
+  };
+
+  return { probe, clear: () => cache.clear() };
+}
+
+const smtpProbeCoordinator = createSmtpProbeCoordinator({
+  concurrency: Number(process.env.SMTP_PROBE_CONCURRENCY || DEFAULT_SMTP_PROBE_CONCURRENCY),
+  backoff_ms: Number(process.env.SMTP_PROBE_BACKOFF_MINUTES || 15) * 60000,
+  max_backoff_ms: Number(process.env.SMTP_PROBE_MAX_BACKOFF_MINUTES || 240) * 60000
+});
 
 function timingTest(label, milliseconds, warningMs, criticalMs) {
   if (!Number.isFinite(milliseconds)) return { label, status: 'critical', value: 'Unavailable', detail: 'The SMTP timing could not be measured.' };
@@ -366,6 +444,14 @@ function evaluateSmtpEvidence(host, evidence, configuredProfile = {}) {
     tests[5] = { label: 'SMTP TLS', status: 'info', value: 'Not run', detail: 'STARTTLS could not be tested without an SMTP greeting.' };
     tests[6] = { label: 'SMTP Open Relay', status: 'info', value: 'Not run', detail: 'The relay-safety probe could not start. No message content was sent.' };
   }
+  if (evidence.rate_limited) {
+    const retry = evidence.next_probe_at ? ` DomainPosture will wait until approximately ${evidence.next_probe_at} before probing this host again.` : ' DomainPosture will back off before probing this host again.';
+    tests[0] = { label: 'SMTP Connection Time', status: 'warning', value: 'Temporarily rate limited', detail: `${evidence.banner || evidence.error || 'The server returned SMTP 421.'}${retry}` };
+    tests[1] = { label: 'SMTP Transaction Time', status: 'info', value: 'Deferred', detail: 'The SMTP transaction was not started after the temporary 421 response.' };
+    tests[4] = { label: 'SMTP Banner Check', status: 'info', value: 'Temporary 421 response', detail: 'The server declined this monitoring connection before presenting its normal SMTP greeting.' };
+    tests[5] = { label: 'SMTP TLS', status: 'info', value: 'Not tested — Temporarily rate limited', detail: 'No TLS conclusion can be drawn because the server deferred the connection before STARTTLS.' };
+    tests[6] = { label: 'SMTP Open Relay', status: 'info', value: 'Not tested — Temporarily rate limited', detail: 'The relay-safety probe was not attempted. No message content was sent.' };
+  }
   let status = tests.reduce((current, test) => STATUS_RANK[test.status] > STATUS_RANK[current] ? test.status : current, 'healthy');
   if (status === 'healthy' && tests.some(test => test.status === 'info')) status = 'info';
   return { ...evidence, host: normalizedHost(host), status, tests, profile };
@@ -378,7 +464,7 @@ function smtpResult(domain, mxRecords, endpoints, profile = smtpProfile(domain, 
   const affected = endpoints.filter(endpoint => endpoint.status !== 'healthy');
   const summary = status === 'healthy' ? `${endpoints.length} MX host${endpoints.length === 1 ? '' : 's'} ready` : status === 'info' ? `${affected.length} MX host${affected.length === 1 ? '' : 's'} not fully tested` : `${affected.length} of ${endpoints.length} MX host${endpoints.length === 1 ? '' : 's'} need${affected.length === 1 ? 's' : ''} attention`;
   const detail = status === 'healthy' ? 'Connection, SMTP greeting, STARTTLS, and relay-safety checks passed.' : affected.map(endpoint => `${endpoint.host}: ${endpoint.tests.filter(test => status === 'info' ? test.status === 'info' : ['warning', 'critical'].includes(test.status)).map(test => test.label).join(', ')}`).join(' · ');
-  const action = endpoints.some(endpoint => endpoint.tests[0]?.status === 'critical') ? 'Confirm that the MX host is reachable on TCP port 25 and review its SMTP service and network logs.' : endpoints.some(endpoint => !endpoint.policy_blocked && (!endpoint.starttls_negotiated || endpoint.tls_authorized === false)) ? 'Correct STARTTLS or certificate trust on the affected MX host, then run checks again. Managed-provider certificate failures still prevent safe MTA-STS enforcement.' : endpoints.some(endpoint => endpoint.relay_status === 'potential' && profile.relay_context === 'external') ? 'Restrict unauthenticated relaying immediately, then repeat the test from an external untrusted address.' : endpoints.some(endpoint => endpoint.policy_blocked) ? 'The receiving service blocked this monitoring source. Use a permitted external probe address and rely on SMTP TLS reports for production delivery evidence.' : endpoints.some(endpoint => endpoint.relay_status === 'potential') ? 'Repeat the relay test from a network outside your organization. If an external probe also accepts the recipient, restrict unauthenticated relaying immediately.' : 'Review the affected SMTP identity or protocol result. Provider-owned PTR and banner names are informational when they are otherwise valid.';
+  const action = endpoints.some(endpoint => endpoint.rate_limited) ? 'No immediate mail-server change is required. DomainPosture will back off automatically; review other monitoring systems if the rate limit continues.' : endpoints.some(endpoint => endpoint.tests[0]?.status === 'critical') ? 'Confirm that the MX host is reachable on TCP port 25 and review its SMTP service and network logs.' : endpoints.some(endpoint => !endpoint.policy_blocked && (!endpoint.starttls_negotiated || endpoint.tls_authorized === false)) ? 'Correct STARTTLS or certificate trust on the affected MX host, then run checks again. Managed-provider certificate failures still prevent safe MTA-STS enforcement.' : endpoints.some(endpoint => endpoint.relay_status === 'potential' && profile.relay_context === 'external') ? 'Restrict unauthenticated relaying immediately, then repeat the test from an external untrusted address.' : endpoints.some(endpoint => endpoint.policy_blocked) ? 'The receiving service blocked this monitoring source. Use a permitted external probe address and rely on SMTP TLS reports for production delivery evidence.' : endpoints.some(endpoint => endpoint.relay_status === 'potential') ? 'Repeat the relay test from a network outside your organization. If an external probe also accepts the recipient, restrict unauthenticated relaying immediately.' : 'Review the affected SMTP identity or protocol result. Provider-owned PTR and banner names are informational when they are otherwise valid.';
   return { id: 'smtp_service', label: 'SMTP service', status, summary, detail, action, evidence: { domain, profile, mx: mxRecords, endpoints, relay_probe_safety: 'Uses reserved example.com/example.net addresses and stops before DATA; no message content is transmitted.' } };
 }
 
@@ -397,12 +483,12 @@ async function smtpDiagnostics(domain, options = {}) {
       return { id: 'smtp_service', label: 'SMTP service', status: nullMx ? 'healthy' : 'info', summary: nullMx ? 'Inbound mail intentionally disabled' : 'No inbound mail expected', detail: nullMx ? 'A standards-based Null MX record is published.' : 'No MX hosts were found. DomainPosture is configured not to expect inbound mail for this domain.', action: nullMx ? 'No action required.' : 'Publish a Null MX record to state explicitly that this domain does not receive mail.', evidence: { domain, profile, mx: [], endpoints: [], null_mx: nullMx } };
     }
     const unique = [...new Map(mxRecords.map(record => [normalizedHost(record.exchange), { priority: record.priority, exchange: normalizedHost(record.exchange) }])).values()].slice(0, 10);
-    const probe = options.probe || probeSmtp;
-    const endpoints = await Promise.all(unique.map(async record => evaluateSmtpEvidence(record.exchange, await probe(record.exchange, { timeout_ms: options.timeout_ms, resolver, ehlo_hostname: options.ehlo_hostname }), profile)));
+    const probe = options.probe || smtpProbeCoordinator.probe;
+    const endpoints = await Promise.all(unique.map(async record => evaluateSmtpEvidence(record.exchange, await probe(record.exchange, { timeout_ms: options.timeout_ms, resolver, ehlo_hostname: options.ehlo_hostname, cooldown_ms: options.cooldown_ms }), profile)));
     return smtpResult(domain, unique, endpoints, profile);
   } catch (error) {
     return { id: 'smtp_service', label: 'SMTP service', status: 'critical', summary: 'SMTP check failed', detail: safeLine(error.message), action: 'Verify the domain’s MX records and confirm that DomainPosture can reach TCP port 25.', evidence: { domain, error: safeLine(error.message), endpoints: [] } };
   }
 }
 
-module.exports = { smtpDiagnostics, probeSmtp, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validHostname, timingTest, smtpProfile, resolveSmtpProfile, detectedProvider, smtpClientIdentity };
+module.exports = { smtpDiagnostics, probeSmtp, createSmtpProbeCoordinator, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validHostname, timingTest, smtpProfile, resolveSmtpProfile, detectedProvider, smtpClientIdentity };

@@ -211,7 +211,8 @@ async function queryBlocklist(provider, value, resolver, timeoutMs = 8000) {
 
 async function reputationCheck(domain, options = {}) {
   const resolver = resolverFor(options); const timeoutMs = Number(options.timeout_ms || 8000); const addresses = new Set(options.addresses || []); const mxHosts = new Set();
-  if (!addresses.size) {
+  const includeDomain = options.include_domain !== false;
+  if (!addresses.size && includeDomain) {
     try {
       const exchanges = await withTimeout(resolver.resolveMx(domain), timeoutMs, `MX lookup for ${domain}`);
       const addressLookups = [];
@@ -224,10 +225,10 @@ async function reputationCheck(domain, options = {}) {
       await Promise.all(addressLookups);
     } catch (_) {}
   }
-  const targets = [queryBlocklist(REPUTATION_PROVIDERS[0], domain, resolver, timeoutMs)];
+  const targets = includeDomain ? [queryBlocklist(REPUTATION_PROVIDERS[0], domain, resolver, timeoutMs)] : [];
   for (const address of [...addresses].slice(0, 20)) for (const provider of REPUTATION_PROVIDERS.filter(item => item.type === 'ip')) targets.push(queryBlocklist(provider, address, resolver, timeoutMs));
   const checks = await Promise.all(targets); const listed = checks.filter(item => item.status === 'listed'); const completed = checks.filter(item => item.status !== 'unavailable');
-  const evidence = { scope: 'Monitored domain and receiving MX addresses; outbound sending services can use different addresses.', mx_hosts: [...mxHosts], addresses: [...addresses].slice(0, 20), providers: REPUTATION_PROVIDERS.map(({ name, type, zone }) => ({ name, type, zone })), checks };
+  const evidence = { scope: includeDomain ? (options.addresses?.length ? 'Requested host name and its public addresses.' : 'Monitored domain and receiving MX addresses; outbound sending services can use different addresses.') : 'Requested public IP address.', mx_hosts: [...mxHosts], addresses: [...addresses].slice(0, 20), providers: REPUTATION_PROVIDERS.map(({ name, type, zone }) => ({ name, type, zone })), checks };
   if (listed.length) return result('reputation', 'IP and domain reputation', 'warning', `${listed.length} blocklist match${listed.length === 1 ? '' : 'es'}`, listed.map(item => `${item.target} is listed by ${item.provider}.`).join(' '), 'Open the named provider’s lookup service, verify the listing, correct the underlying cause, and follow that provider’s removal process.', evidence);
   if (!completed.length) return result('reputation', 'IP and domain reputation', 'info', 'Screening unavailable', 'The configured DNS resolver could not query any reputation provider.', 'Allow DNS-blocklist queries or configure a permitted provider service. Do not treat an unavailable result as clean.', evidence);
   const unavailable = checks.length - completed.length;

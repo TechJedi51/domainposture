@@ -1,6 +1,6 @@
 # DomainPosture
 
-DomainPosture 3.2.0 is a focused domain-health dashboard. It combines email posture checks and report analysis with public and origin SSL/TLS certificate monitoring. Each domain can enable only the review sections that apply to it, and the Domain Score includes only checks from enabled sections.
+DomainPosture 3.3.0 is a focused domain-health dashboard. It combines email posture checks and report analysis with public and origin SSL/TLS certificate monitoring, on-demand DNS and reputation lookups, and optional DNS change alerts. Each domain can enable only the review sections that apply to it, and the Domain Score includes only checks from enabled scored sections.
 
 The application evolved in place from MailPosture. Existing domains, settings, report data, ParseDMARC configuration, OpenSearch data, snapshots, and Docker volumes remain usable. Some legacy internal names are intentionally retained where renaming them would risk data loss; see [Upgrading from MailPosture](#upgrading-from-mailposture).
 
@@ -11,6 +11,8 @@ The application evolved in place from MailPosture. Existing domains, settings, r
 - SMTP TLS report data from OpenSearch
 - Live MX SMTP reachability, greeting, STARTTLS, certificate trust, and relay behavior
 - Limited IP and domain reputation signals
+- On-demand A, AAAA, CNAME, MX, NS, TXT, CAA, SOA, PTR, TLS-RPT, and reputation lookups
+- Optional monitoring and Discord notification for confirmed DNS record changes
 - Public HTTPS certificates resolved through normal DNS
 - Optional origin HTTPS certificates reached at a specific IPv4 or IPv6 address while using the domain for SNI and hostname validation
 
@@ -93,11 +95,25 @@ The certificate card shows each enabled path separately so the reason for any sc
 
 ## Scheduling and Check Now
 
-The existing application refresh scheduler remains authoritative. The default application refresh is every 15 minutes. Certificate results have their own six-hour freshness interval (`360` minutes), so ordinary refreshes reuse stored results until they are due.
+The existing application refresh scheduler remains authoritative. The default application refresh is every 15 minutes. Certificate results have their own six-hour freshness interval (`360` minutes), so ordinary refreshes reuse stored results until they are due. SMTP probes have a separate 30-minute per-MX cooldown. Results for a shared MX host are reused across domains, and DomainPosture permits at most two live SMTP probes at once.
 
-**Check Now** on a domain runs every check for that domain and forces all its enabled certificate paths to run immediately. The global refresh action also forces certificate checks. Normal page rendering only reads the current snapshot and never runs ssl-watch synchronously.
+**Check Now** on a domain runs every enabled check for that domain and forces all its enabled certificate paths to run immediately. SMTP probes still honor their cooldown and 421 backoff so repeated clicks cannot create a connection burst. The global refresh action also forces certificate checks. Normal page rendering only reads the current snapshot and never runs ssl-watch synchronously.
 
-The certificate interval can be changed under **Settings → General → Monitoring behavior** from 5 minutes to 7 days.
+The certificate interval and SMTP probe cooldown can be changed under **Settings → General → Monitoring behavior**. When an MX server returns SMTP `421`, DomainPosture reports the probe as temporarily rate limited, draws no TLS or relay conclusion, and applies exponential backoff with jitter before trying that host again.
+
+Saving Settings validates and writes the settings, secrets, and generated ParseDMARC configuration before confirming success. The OpenSearch snapshot-policy update and full monitoring refresh then continue in the background instead of keeping the **Save settings** button in its Saving state while network operations complete.
+
+## Lookup Center and DNS change monitoring
+
+The **Lookup Center** at `/tools` accepts a fully qualified host name or an IP address. Host-name lookups show standard DNS records, validate the domain's TLS-RPT record, and run the existing limited reputation checks for the host and its resolved public IP addresses. IP lookups show PTR records and reputation results. Private, loopback, link-local, multicast, and documentation IP addresses are not submitted to DNS blocklists.
+
+Reputation results are limited to the providers built into DomainPosture. A provider timeout, refusal, or policy restriction is reported as unavailable and is never treated as a clean result. Lookup results are cached for five minutes, simultaneous identical requests are combined, and each client address is limited to 20 lookup requests per minute.
+
+DNS change monitoring is configured separately for each domain in **Settings → Domains**. It supports A, AAAA, CNAME, MX, NS, SOA, and TLS-RPT records. Switching monitoring off preserves the saved record list. Monitoring is intentionally non-scored: its results and availability never change the Domain Score.
+
+The first successful observation establishes a baseline and sends no notification. By default, DomainPosture requires the changed value to appear in two consecutive checks before accepting it and sending one Discord notification. The confirmation count is configurable under **Settings → General → Monitoring behavior**. A and AAAA answer order and TTL changes are ignored; SOA monitoring compares the serial number. Disabling a monitor clears its transition state, so re-enabling it establishes a new baseline.
+
+These checks follow the DNS definitions in [RFC 1035](https://www.rfc-editor.org/info/rfc1035/) and TLS reporting record format in [RFC 8460](https://www.rfc-editor.org/info/rfc8460/). DNS blocklist access can be restricted by provider policy; see the [Spamhaus DNSBL usage requirements](https://www.spamhaus.org/faqs/dnsbl-usage/).
 
 ## Discord notifications
 
@@ -121,6 +137,7 @@ Notification controls are available in Settings for:
 - certificate notifications
 - the certificate warning threshold
 - domain Needs Attention notifications
+- confirmed DNS record change notifications
 
 Notification state is persisted in `/data/domainposture-state.json`. Public and origin paths have independent state. DomainPosture sends one certificate message when a path first crosses the 30-day, 14-day, or 7-day milestone, or becomes expired, invalid, or unavailable. It does not repeat the same state on later scans. A return to a non-actionable state sends one recovery message and resets the milestone sequence for the next certificate.
 
@@ -171,6 +188,10 @@ The web interface manages domains, certificate paths, report history, refresh in
 | `DOMAINPOSTURE_SECRETS_KEY` | Optional direct key value for a deployment secret manager; a file mount is preferred because environment values are easier to expose accidentally |
 | `DOMAINPOSTURE_MANAGED_SECRETS_KEY_FILE` | Optional override for the managed key path; defaults to `/data/.domainposture-secrets-key` |
 | `DOMAINPOSTURE_DISCORD_WEBHOOK` | Optional Discord webhook fallback when none is saved in Settings |
+| `SMTP_PROBE_COOLDOWN_MINUTES` | Default per-MX live-probe cooldown; defaults to 30 and can be changed in Settings |
+| `SMTP_PROBE_CONCURRENCY` | Maximum simultaneous live SMTP probes; defaults to 2 |
+| `SMTP_PROBE_BACKOFF_MINUTES` | Initial backoff after SMTP 421; defaults to 15 |
+| `SMTP_PROBE_MAX_BACKOFF_MINUTES` | Maximum SMTP 421 backoff; defaults to 240 |
 | `DOMAINPOSTURE_SETTINGS_PATH` | Optional standalone host path mounted at `/data` |
 | `DOMAINPOSTURE_DATA_VOLUME` | Optional Docker volume name for `/data` in the lightweight stack |
 | `OPENSEARCH_URL` | Existing OpenSearch URL |
@@ -198,7 +219,7 @@ Deprecated `MAILPOSTURE_IMAGE`, `MAILPOSTURE_DISCORD_WEBHOOK`, `MAILPOSTURE_SETT
 
 1. Back up the existing `/data` volume or `${ROOT}/mailposture` directory and the OpenSearch snapshot repository.
 2. Do not delete or recreate Docker volumes, OpenSearch data, or the report mailbox.
-3. Pull or build the DomainPosture 3.2.0 image.
+3. Pull or build the DomainPosture 3.3.0 image.
 4. Keep the existing `mailposture_data` volume or legacy host path during the first upgrade. The supplied Compose defaults do this automatically.
 5. Remove `DOMAINPOSTURE_SECRETS_KEY_FILE` and the Compose `secrets` mount unless you intend to keep using an external key. Then start the updated stack.
 6. Open Settings, create the secrets encryption key, and save the displayed recovery key in a secure password manager.
@@ -206,11 +227,11 @@ Deprecated `MAILPOSTURE_IMAGE`, `MAILPOSTURE_DISCORD_WEBHOOK`, `MAILPOSTURE_SETT
 8. Save Settings, then confirm `/healthz`, **System Status**, the saved domain list, report counts, and a manual certificate check.
 9. Configure origin certificate paths only after confirming their intended IP addresses.
 
-Settings are normalized to schema 9 when loaded. Existing domain and report settings are preserved. Every existing domain receives all six check sections enabled, public certificate monitoring enabled, and origin monitoring disabled unless those settings already exist. Saving Settings writes the normalized schema atomically.
+Settings are normalized to schema 11 when loaded. Existing domain and report settings are preserved, and existing installations receive a 30-minute SMTP probe cooldown. Every existing domain receives all six check sections enabled, public certificate monitoring enabled, origin monitoring disabled unless those settings already exist, and DNS change monitoring disabled until it is explicitly configured. Saving Settings writes the normalized schema atomically.
 
 The Compose project and service keys, default standalone paths, snapshot repository name, internal ParseDMARC runtime path, internal OpenSearch policy name, compatibility network aliases, and named diagnostic volumes still contain `mailposture`. They are deliberately retained so Compose can recreate the existing service in place and reuse its data. The container name, primary network alias, user-facing branding, preferred environment variables, package metadata, and new files use DomainPosture.
 
-Rollback is to stop the 3.2.0 containers, restore the pre-upgrade `/data` backup, and restart the prior image. Preserve the 3.1 encryption key even after rollback so encrypted secrets can be recovered later.
+Rollback is to stop the 3.3.0 containers, restore the pre-upgrade `/data` backup, and restart the prior image. Preserve the 3.1 encryption key even after rollback so encrypted secrets can be recovered later.
 
 ## Data and privacy
 
@@ -218,7 +239,7 @@ Rollback is to stop the 3.2.0 containers, restore the pre-upgrade `/data` backup
 - `/data/secrets.json` stores the report-mailbox password and optional Discord webhook in an AES-256-GCM authenticated-encryption envelope with restrictive file permissions.
 - `/data/.domainposture-secrets-key` stores the protected working copy created through Settings. Keep the one-time recovery copy outside this volume.
 - Advanced deployments can use `/run/secrets/domainposture_secrets_key` instead, keeping the active key separate from `/data`.
-- `/data/domainposture-state.json` stores certificate cache and notification transition state.
+- `/data/domainposture-state.json` stores certificate cache and notification transition state, including DNS-monitor baselines and pending confirmed changes.
 - ParseDMARC writes normalized reports to OpenSearch and controls mailbox archive/delete behavior.
 - DomainPosture shows RUF counts but intentionally does not display potentially sensitive report samples.
 - SMTP relay probes use reserved example addresses, stop before `DATA`, and never send message content.
@@ -242,6 +263,8 @@ If a certificate check fails:
 
 If Discord is not sending messages, confirm Settings reports a saved or environment webhook, the notification switches are enabled, and the container can reach Discord. Existing actionable states do not alert immediately after an upgrade because the first scan establishes the deduplication baseline.
 
+If an SMTP transcript contains `421 4.4.5 Too many SMTP connections from this host`, wait for the displayed next-probe time rather than repeatedly selecting **Run checks**. DomainPosture reuses the result during the cooldown and increases the backoff after repeated 421 responses. If the condition persists, check for other monitoring services sharing the same public or NAT address before changing the mail server’s limits.
+
 ## Development and verification
 
 ```sh
@@ -251,9 +274,9 @@ node --check ssl-monitor.js
 node --check public/app.js
 ```
 
-The test suite covers settings migration, section-controlled scoring, public/origin argument construction, encrypted secret round trips, managed-key rotation and interrupted-rotation recovery, input rejection, JSON normalization, distinct cached paths, status thresholds, forced and scheduled-cache behavior, Discord webhook validation, precedence, test delivery, notification milestones, deduplication, recovery, UI wiring, and existing email posture behavior.
+The test suite covers settings migration, section-controlled scoring, public/origin argument construction, encrypted secret round trips, managed-key rotation and interrupted-rotation recovery, SMTP concurrency, shared-MX deduplication, cooldown and 421 backoff, DNS normalization and caching, TLS-RPT lookup validation, DNS change confirmation and notification state, input rejection, JSON normalization, distinct cached paths, status thresholds, forced and scheduled-cache behavior, Discord webhook validation, precedence, test delivery, notification milestones, recovery, UI wiring, container module inclusion, and existing email posture behavior.
 
-The integration follows the current upstream [ssl-watch documentation](https://github.com/idesyatov/ssl-watch) and pins version 1.17.2. Its MIT attribution is retained in `THIRD_PARTY_NOTICES.md`. The project uses semantic versioning; the current DomainPosture minor release is `3.2.0`.
+The integration follows the current upstream [ssl-watch documentation](https://github.com/idesyatov/ssl-watch) and pins version 1.17.2. Its MIT attribution is retained in `THIRD_PARTY_NOTICES.md`. The project uses semantic versioning; the current DomainPosture minor release is `3.3.0`.
 
 ## Repository rename
 
