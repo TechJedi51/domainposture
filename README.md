@@ -1,6 +1,6 @@
 # DomainPosture
 
-DomainPosture 3.4.0 is a focused domain-health dashboard. It combines email posture checks and report analysis with public and origin SSL/TLS certificate monitoring, on-demand DNS and network lookups, and optional DNS change alerts. Each domain can enable only the review sections that apply to it, and the Domain Score includes only checks from enabled scored sections.
+DomainPosture 3.4.1 is a focused domain-health dashboard. It combines email posture checks and report analysis with public and origin SSL/TLS certificate monitoring, on-demand DNS and network lookups, and optional DNS change alerts. Each domain can enable only the review sections that apply to it, and the Domain Score includes only checks from enabled scored sections.
 
 The application evolved in place from MailPosture. Existing domains, settings, report data, ParseDMARC configuration, OpenSearch data, snapshots, and Docker volumes remain usable. Some legacy internal names are intentionally retained where renaming them would risk data loss; see [Upgrading from MailPosture](#upgrading-from-mailposture).
 
@@ -230,7 +230,7 @@ Deprecated `MAILPOSTURE_IMAGE`, `MAILPOSTURE_DISCORD_WEBHOOK`, `MAILPOSTURE_SETT
 
 1. Back up the existing `/data` volume or `${ROOT}/mailposture` directory and the OpenSearch snapshot repository.
 2. Do not delete or recreate Docker volumes, OpenSearch data, or the report mailbox.
-3. Pull or build the DomainPosture 3.4.0 image.
+3. Pull or build the DomainPosture 3.4.1 image.
 4. Keep the existing `mailposture_data` volume or legacy host path during the first upgrade. The supplied Compose defaults do this automatically.
 5. Remove `DOMAINPOSTURE_SECRETS_KEY_FILE` and the Compose `secrets` mount unless you intend to keep using an external key. Then start the updated stack.
 6. Open Settings, create the secrets encryption key, and save the displayed recovery key in a secure password manager.
@@ -242,7 +242,7 @@ Settings are normalized to schema 11 when loaded. Existing domain and report set
 
 The Compose project and service keys, default standalone paths, snapshot repository name, internal ParseDMARC runtime path, internal OpenSearch policy name, compatibility network aliases, and named diagnostic volumes still contain `mailposture`. They are deliberately retained so Compose can recreate the existing service in place and reuse its data. The container name, primary network alias, user-facing branding, preferred environment variables, package metadata, and new files use DomainPosture.
 
-Rollback is to stop the 3.4.0 containers, restore the pre-upgrade `/data` backup, and restart the prior image. Preserve the 3.1 encryption key even after rollback so encrypted secrets can be recovered later.
+Rollback is to stop the 3.4.1 containers, restore the pre-upgrade `/data` backup, and restart the prior image. Preserve the 3.1 encryption key even after rollback so encrypted secrets can be recovered later.
 
 ## Data and privacy
 
@@ -287,7 +287,7 @@ node --check public/app.js
 
 The test suite covers settings migration, section-controlled scoring, public/origin argument construction, encrypted secret round trips, managed-key rotation and interrupted-rotation recovery, SMTP concurrency, shared-MX deduplication, cooldown and 421 backoff, DNS normalization and caching, TLS-RPT lookup validation, DNS change confirmation and notification state, input rejection, JSON normalization, distinct cached paths, status thresholds, forced and scheduled-cache behavior, Discord webhook validation, precedence, test delivery, notification milestones, recovery, UI wiring, container module inclusion, and existing email posture behavior.
 
-The integration follows the current upstream [ssl-watch documentation](https://github.com/idesyatov/ssl-watch) and pins version 1.17.2. Its MIT attribution is retained in `THIRD_PARTY_NOTICES.md`. The project uses semantic versioning; the current DomainPosture minor release is `3.4.0`.
+The integration follows the current upstream [ssl-watch documentation](https://github.com/idesyatov/ssl-watch) and pins version 1.17.2. Its MIT attribution is retained in `THIRD_PARTY_NOTICES.md`. The project uses semantic versioning; the current DomainPosture release is `3.4.1`.
 
 ## Repository rename
 
