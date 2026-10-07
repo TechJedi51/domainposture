@@ -3,19 +3,33 @@
 const dns = require('dns').promises;
 const net = require('net');
 const { tlsRptCheck, reputationCheck } = require('./dns-security');
+const networkTools = require('./network-tools');
+const { isPublicIp } = networkTools;
 
-const LOOKUP_RECORD_TYPES = Object.freeze(['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT', 'CAA', 'SOA', 'TLSRPT']);
+const LOOKUP_RECORD_TYPES = Object.freeze(['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT', 'CAA', 'SOA', 'SRV', 'TLSRPT']);
 const MONITOR_RECORD_TYPES = Object.freeze(['A', 'AAAA', 'CNAME', 'MX', 'NS', 'SOA', 'TLSRPT']);
+const LOOKUP_TOOLS = Object.freeze(['overview', 'dnssec', 'registration', 'srv', 'web', 'asn', 'tcp']);
 
 function validHostname(value) {
   return /^(?=.{1,253}$)(?!-)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(value);
 }
 
+function validSrvName(value) {
+  return /^_[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\._(?:tcp|udp)\.(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(value);
+}
+
 function normalizeLookupTarget(value) {
   const target = String(value || '').trim().toLowerCase().replace(/\.$/, '');
   if (net.isIP(target)) return { target, kind: 'ip', family: net.isIP(target) };
+  if (validSrvName(target)) return { target, kind: 'srv', family: null };
   if (validHostname(target)) return { target, kind: 'hostname', family: null };
-  throw new Error('Enter a valid fully qualified domain name, host name, IPv4 address, or IPv6 address.');
+  throw new Error('Enter a valid fully qualified domain name, host name, SRV record name, IPv4 address, or IPv6 address.');
+}
+
+function normalizeLookupTool(value) {
+  const tool = String(value || 'overview').trim().toLowerCase();
+  if (!LOOKUP_TOOLS.includes(tool)) throw new Error('Choose a supported Lookup Center tool.');
+  return tool;
 }
 
 function dnsMissing(error) {
@@ -33,21 +47,6 @@ function withTimeout(promise, timeoutMs, label) {
 function resolverFor(options = {}) {
   if (options.resolver) return options.resolver;
   return new dns.Resolver({ timeout: Math.min(5000, Number(options.timeout_ms || 8000)), tries: 1 });
-}
-
-function isPublicIp(address) {
-  const family = net.isIP(address);
-  if (family === 4) {
-    const [a, b, c] = address.split('.').map(Number);
-    return !(a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 0 && c === 0) || (a === 192 && b === 0 && c === 2) || (a === 192 && b === 168) || (a === 198 && (b === 18 || b === 19)) || (a === 198 && b === 51 && c === 100) || (a === 203 && b === 0 && c === 113));
-  }
-  if (family === 6) {
-    const normalized = address.toLowerCase();
-    const mappedIpv4 = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/)?.[1];
-    if (mappedIpv4) return isPublicIp(mappedIpv4);
-    return !(normalized === '::' || normalized === '::1' || normalized.startsWith('fc') || normalized.startsWith('fd') || /^fe[89ab]/.test(normalized) || normalized.startsWith('ff') || normalized.startsWith('2001:db8:'));
-  }
-  return false;
 }
 
 function normalizedAddressRecords(values = []) {
@@ -69,6 +68,7 @@ async function resolveRecord(target, type, options = {}) {
   const timeoutMs = Number(options.timeout_ms || 8000);
   const resolver = resolverFor(options);
   if (normalizedTarget.kind === 'ip' && recordType !== 'PTR') throw new Error('Only PTR lookup is available for an IP address.');
+  if (normalizedTarget.kind === 'srv' && recordType !== 'SRV') throw new Error('Only SRV lookup is available for an SRV record name.');
   if (normalizedTarget.kind === 'hostname' && !LOOKUP_RECORD_TYPES.includes(recordType)) throw new Error(`Unsupported DNS record type: ${recordType || '(empty)'}.`);
   const queriedName = recordType === 'TLSRPT' ? `_smtp._tls.${normalizedTarget.target}` : normalizedTarget.target;
   try {
@@ -82,6 +82,7 @@ async function resolveRecord(target, type, options = {}) {
     else if (recordType === 'TXT' || recordType === 'TLSRPT') values = (await withTimeout(resolver.resolveTxt(queriedName), timeoutMs, `${recordType} lookup for ${queriedName}`)).map(parts => parts.join(''));
     else if (recordType === 'CAA') values = await withTimeout(resolver.resolveCaa(queriedName), timeoutMs, `CAA lookup for ${queriedName}`);
     else if (recordType === 'SOA') values = [await withTimeout(resolver.resolveSoa(queriedName), timeoutMs, `SOA lookup for ${queriedName}`)];
+    else if (recordType === 'SRV') values = (await withTimeout(resolver.resolveSrv(queriedName), timeoutMs, `SRV lookup for ${queriedName}`)).map(value => ({ priority: value.priority, weight: value.weight, port: value.port, name: String(value.name || '').toLowerCase().replace(/\.$/, '') })).sort((a, b) => a.priority - b.priority || b.weight - a.weight || a.name.localeCompare(b.name));
     else throw new Error(`Unsupported DNS record type: ${recordType || '(empty)'}.`);
     const sorted = [...values].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
     return { target: normalizedTarget.target, queried_name: queriedName, type: recordType, status: sorted.length ? 'available' : 'missing', values: sorted, identity: canonicalValues(recordType, sorted), checked_at: new Date().toISOString() };
@@ -93,23 +94,49 @@ async function resolveRecord(target, type, options = {}) {
 
 async function lookupTarget(value, options = {}) {
   const normalized = normalizeLookupTarget(value);
+  const tool = normalizeLookupTool(options.tool);
   const resolver = resolverFor(options);
   const sharedOptions = { ...options, resolver };
+  const common = { target: normalized.target, kind: normalized.kind, tool, checked_at: new Date().toISOString() };
+  if (tool === 'srv') {
+    if (normalized.kind !== 'srv') throw new Error('Enter a complete SRV record name, such as _sip._tcp.example.com.');
+    return { ...common, dns: [await resolveRecord(normalized.target, 'SRV', sharedOptions)] };
+  }
+  if (normalized.kind === 'srv') throw new Error('Choose the SRV record tool for an SRV record name.');
+  if (tool === 'dnssec') {
+    if (normalized.kind !== 'hostname') throw new Error('DNSSEC validation requires a domain or host name.');
+    return { ...common, dnssec: await networkTools.dnssecCheck(normalized.target, sharedOptions) };
+  }
+  if (tool === 'registration') {
+    if (normalized.kind !== 'hostname') throw new Error('Domain registration lookup requires a domain or host name.');
+    return { ...common, registration: await networkTools.rdapRegistration(normalized.target, sharedOptions) };
+  }
+  if (tool === 'web') {
+    if (normalized.kind !== 'hostname') throw new Error('HTTP/HTTPS diagnostics require a public domain or host name.');
+    return { ...common, web: await networkTools.webDiagnostics(normalized.target, sharedOptions) };
+  }
+  if (tool === 'asn') {
+    const addresses = normalized.kind === 'ip' ? [normalized.target] : await networkTools.publicAddresses(normalized.target, sharedOptions);
+    return { ...common, ownership: await networkTools.asnOwnership(addresses, sharedOptions) };
+  }
+  if (tool === 'tcp') {
+    return { ...common, tcp: await networkTools.tcpPortCheck(normalized.target, options.tcp_port, sharedOptions) };
+  }
   if (normalized.kind === 'ip') {
     const dnsRecords = [await resolveRecord(normalized.target, 'PTR', sharedOptions)];
     const publicAddresses = isPublicIp(normalized.target) ? [normalized.target] : [];
     const reputation = publicAddresses.length
       ? await reputationCheck('', { ...sharedOptions, addresses: publicAddresses, include_domain: false })
       : { id: 'reputation', label: 'IP reputation', status: 'info', summary: 'Not queried', detail: 'Private, loopback, link-local, multicast, and documentation addresses are not submitted to public blocklists.', action: 'Enter a public IP address to run a reputation lookup.', evidence: { addresses: [normalized.target], checks: [] } };
-    return { target: normalized.target, kind: normalized.kind, checked_at: new Date().toISOString(), dns: dnsRecords, tls_rpt: null, reputation };
+    return { ...common, dns: dnsRecords, tls_rpt: null, reputation };
   }
-  const dnsRecords = await Promise.all(LOOKUP_RECORD_TYPES.filter(type => type !== 'TLSRPT').map(type => resolveRecord(normalized.target, type, sharedOptions)));
+  const dnsRecords = await Promise.all(LOOKUP_RECORD_TYPES.filter(type => !['TLSRPT', 'SRV'].includes(type)).map(type => resolveRecord(normalized.target, type, sharedOptions)));
   const addresses = dnsRecords.filter(record => ['A', 'AAAA'].includes(record.type)).flatMap(record => record.values.map(item => item.address)).filter(isPublicIp);
   const [tlsRpt, reputation] = await Promise.all([
     tlsRptCheck(normalized.target, sharedOptions),
     reputationCheck(normalized.target, { ...sharedOptions, addresses, include_domain: true })
   ]);
-  return { target: normalized.target, kind: normalized.kind, checked_at: new Date().toISOString(), dns: dnsRecords, tls_rpt: tlsRpt, reputation };
+  return { ...common, dns: dnsRecords, tls_rpt: tlsRpt, reputation };
 }
 
 function createLookupCenter(options = {}) {
@@ -119,17 +146,20 @@ function createLookupCenter(options = {}) {
   const execute = options.lookup || lookupTarget;
   const cache = new Map();
   const inFlight = new Map();
-  const lookup = value => {
+  const lookup = (value, toolValue = 'overview', tcpPortValue = null) => {
     const normalized = normalizeLookupTarget(value);
-    const cached = cache.get(normalized.target);
+    const tool = normalizeLookupTool(toolValue);
+    const tcpPort = tool === 'tcp' ? networkTools.normalizeTcpPort(tcpPortValue) : null;
+    const cacheKey = `${normalized.target}|${tool}|${tcpPort || ''}`;
+    const cached = cache.get(cacheKey);
     if (cached && now() < cached.expiresAt) return Promise.resolve({ ...cached.result, cached: true });
-    if (inFlight.has(normalized.target)) return inFlight.get(normalized.target).then(result => ({ ...result, shared: true }));
-    const operation = Promise.resolve().then(() => execute(normalized.target, options)).then(result => {
-      cache.set(normalized.target, { result, expiresAt: now() + ttlMs });
+    if (inFlight.has(cacheKey)) return inFlight.get(cacheKey).then(result => ({ ...result, shared: true }));
+    const operation = Promise.resolve().then(() => execute(normalized.target, { ...options, tool, tcp_port: tcpPort })).then(result => {
+      cache.set(cacheKey, { result, expiresAt: now() + ttlMs });
       while (cache.size > maxEntries) cache.delete(cache.keys().next().value);
       return { ...result, cached: false };
-    }).finally(() => inFlight.delete(normalized.target));
-    inFlight.set(normalized.target, operation);
+    }).finally(() => inFlight.delete(cacheKey));
+    inFlight.set(cacheKey, operation);
     return operation;
   };
   return { lookup, clear: () => cache.clear() };
@@ -139,4 +169,4 @@ async function checkDnsMonitors(monitors = [], options = {}) {
   return Promise.all(monitors.map(async monitor => ({ ...monitor, ...(await resolveRecord(monitor.host, monitor.type, options)) })));
 }
 
-module.exports = { LOOKUP_RECORD_TYPES, MONITOR_RECORD_TYPES, validHostname, normalizeLookupTarget, isPublicIp, canonicalValues, resolveRecord, lookupTarget, createLookupCenter, checkDnsMonitors };
+module.exports = { LOOKUP_RECORD_TYPES, MONITOR_RECORD_TYPES, LOOKUP_TOOLS, validHostname, validSrvName, normalizeLookupTarget, normalizeLookupTool, isPublicIp, canonicalValues, resolveRecord, lookupTarget, createLookupCenter, checkDnsMonitors };

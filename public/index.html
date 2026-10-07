@@ -21,20 +21,18 @@
   <header>
     <a class="brand" href="/" data-route="/">
       <img src="/domainposture.svg" alt="">
-      <span class="brand-copy"><strong>DomainPosture</strong><small id="version">v3.3.0</small></span>
+      <span class="brand-copy"><strong>DomainPosture</strong><small id="version">v3.4.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
-      <a class="toolbar-button" href="/" data-route="/"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span>Dashboard</span></a>
+      <a class="toolbar-button" href="/" data-route="/" aria-label="Dashboard" title="Dashboard"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span class="toolbar-label">Dashboard</span></a>
       <div class="domain-menu">
-        <button id="domain-menu-button" class="toolbar-button" type="button" aria-haspopup="menu" aria-expanded="false"><span class="toolbar-icon monitored-domains-icon" aria-hidden="true"></span><span>Domains</span><span class="menu-chevron" aria-hidden="true">⌄</span></button>
+        <button id="domain-menu-button" class="toolbar-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-label="Domains" title="Domains"><span class="toolbar-icon monitored-domains-icon" aria-hidden="true"></span><span class="toolbar-label">Domains</span><span class="menu-chevron" aria-hidden="true">⌄</span></button>
         <div id="domain-menu-list" class="domain-menu-list" role="menu" hidden></div>
       </div>
-      <a class="toolbar-button" href="/tools" data-route="/tools"><span class="toolbar-icon lookup-tools-icon" aria-hidden="true"></span><span>Lookup Center</span></a>
-      <a id="system-status-tab" class="toolbar-button" href="/status" data-route="/status"><span class="toolbar-icon system-status-icon" aria-hidden="true"></span><span>System Status</span></a>
+      <a class="toolbar-button" href="/tools" data-route="/tools" aria-label="Lookup Center" title="Lookup Center"><span class="toolbar-icon lookup-tools-icon" aria-hidden="true"></span><span class="toolbar-label">Lookup Center</span></a>
     </nav>
     <div class="header-actions">
-      <span id="updated">Starting checks…</span>
-      <button id="refresh" class="toolbar-button"><span class="toolbar-icon run-checks-icon" aria-hidden="true"></span><span class="toolbar-label">Run checks</span></button>
+      <button id="refresh" class="toolbar-button" aria-label="Run checks" title="Run checks"><span class="toolbar-icon run-checks-icon" aria-hidden="true"></span><span class="toolbar-label">Run checks</span></button>
       <a class="symbol-button" href="/help" data-route="/help" aria-label="Help" title="Help">?</a>
       <a id="system-status-indicator" class="symbol-button" href="/status" data-route="/status" aria-label="System Status: Checking" title="System Status"><span class="status-symbol warning" aria-hidden="true"></span></a>
       <a class="symbol-button" href="/settings" data-route="/settings" aria-label="Settings" title="Settings"><span class="toolbar-icon settings-icon" aria-hidden="true"></span></a>
@@ -78,14 +76,17 @@
     <section class="page-intro">
       <small>On-demand diagnostics</small>
       <h1>Lookup Center</h1>
-      <p>Inspect public DNS, TLS reporting, and limited reputation signals without adding the target as a monitored domain.</p>
+      <p>Run focused public DNS, registration, web, network ownership, and connectivity checks without adding the target as a monitored domain.</p>
     </section>
     <section class="lookup-panel">
       <form id="lookup-form" class="lookup-form">
-        <div class="field"><label for="lookup-target">Domain, host name, or public IP address</label><input id="lookup-target" type="text" autocomplete="off" spellcheck="false" placeholder="example.com" required></div>
+        <div class="field"><label for="lookup-tool">Lookup type</label><select id="lookup-tool"><option value="overview">DNS, TLS-RPT, and reputation overview</option><option value="dnssec">DNSSEC validation</option><option value="registration">Domain registration (RDAP)</option><option value="srv">SRV record</option><option value="web">HTTP/HTTPS diagnostics</option><option value="asn">ASN and IP ownership</option><option value="tcp">TCP port connectivity</option></select></div>
+        <div class="field lookup-target-field"><label for="lookup-target">Domain, host name, SRV record, or public IP address</label><input id="lookup-target" type="text" autocomplete="off" spellcheck="false" placeholder="example.com" required></div>
+        <div id="lookup-port-field" class="field" hidden><label for="lookup-port">TCP port</label><select id="lookup-port"><option value="22">22 · SSH</option><option value="25">25 · SMTP</option><option value="53">53 · DNS</option><option value="80">80 · HTTP</option><option value="110">110 · POP3</option><option value="143">143 · IMAP</option><option value="443" selected>443 · HTTPS</option><option value="465">465 · SMTPS</option><option value="587">587 · Mail submission</option><option value="993">993 · IMAPS</option><option value="995">995 · POP3S</option><option value="8080">8080 · Alternate HTTP</option><option value="8443">8443 · Alternate HTTPS</option></select></div>
         <button type="submit">Run lookup</button>
       </form>
-      <p id="lookup-message" class="diagnostic-note" role="status">Results are cached briefly. Private, loopback, link-local, multicast, and documentation addresses are not submitted to public blocklists.</p>
+      <p id="lookup-tool-note" class="diagnostic-note">Uses DomainPosture’s configured DNS resolver and the existing reputation providers. Private, reserved, and documentation addresses are not submitted.</p>
+      <p id="lookup-message" class="diagnostic-note" role="status">Results are cached briefly.</p>
     </section>
     <section id="lookup-results" class="lookup-results" aria-live="polite"></section>
   </main>
@@ -232,6 +233,17 @@
       <p>DomainPosture turns domain, email-security, and certificate checks into a prioritized status view.</p>
     </section>
     <section class="help-section">
+      <div class="heading"><div><small>On-demand diagnostics</small><h2>Lookup Center tools</h2></div></div>
+      <div class="glossary-grid">
+        <article><h3>DNSSEC validation</h3><p>Uses Google Public DNS over HTTPS to report whether the response was authenticated with DNSSEC and to show returned DNSKEY and DS records.</p></article>
+        <article><h3>Domain registration</h3><p>Uses IANA’s RDAP bootstrap registry and the applicable domain registry’s RDAP service to show available registration dates, registrar, status, and name servers.</p></article>
+        <article><h3>SRV record</h3><p>Resolves a complete service record name such as <code>_sip._tcp.example.com</code>, including priority, weight, port, and target.</p></article>
+        <article><h3>HTTP/HTTPS diagnostics</h3><p>Sends HEAD requests directly to the public endpoints and reports status, redirects, timing, and selected response security headers without downloading page content.</p></article>
+        <article><h3>ASN and IP ownership</h3><p>Uses Team Cymru’s community DNS service to map public IP addresses to BGP origin ASN, network prefix, and registry ownership information.</p></article>
+        <article><h3>TCP port connectivity</h3><p>Opens and immediately closes one connection to a selected common public port. It sends no application data and blocks private, reserved, documentation, and arbitrary port destinations.</p></article>
+      </div>
+    </section>
+    <section class="help-section">
       <h2>Getting started</h2>
       <ol class="steps">
         <li><strong>Add domains.</strong><span>Open Settings and add every domain that appears after the @ in your organization’s From addresses.</span></li>
@@ -282,6 +294,10 @@
         <div><dt>SNI</dt><dd>Server Name Indication. It tells a TLS server which host name is being requested so the server can present the matching certificate.</dd></div>
         <div><dt>PTR record</dt><dd>A reverse-DNS record that maps an IP address to a host name. DomainPosture uses it as supporting SMTP identity information.</dd></div>
         <div><dt>SOA record</dt><dd>The Start of Authority record identifies the zone’s primary name server, responsible mailbox, serial number, and DNS timing values.</dd></div>
+        <div><dt>SRV record</dt><dd>A DNS record that identifies a service’s target host, port, priority, and weight.</dd></div>
+        <div><dt>DNSSEC</dt><dd>DNS Security Extensions. A validating resolver uses signed DNS data to detect forged or altered responses.</dd></div>
+        <div><dt>RDAP</dt><dd>Registration Data Access Protocol. The structured HTTPS replacement for most public WHOIS registration lookups.</dd></div>
+        <div><dt>ASN</dt><dd>Autonomous System Number. It identifies a network that announces IP address prefixes through BGP.</dd></div>
         <div><dt>DNSBL</dt><dd>A DNS-based blocklist used as one reputation signal. A provider-unavailable result is not the same as a clean result.</dd></div>
         <div><dt>TLS-RPT</dt><dd>SMTP TLS reporting policy published as a TXT record at <code>_smtp._tls</code>. It identifies where aggregate delivery-security reports should be sent.</dd></div>
         <div><dt>Origin certificate</dt><dd>The certificate returned when DomainPosture connects directly to a configured origin IP while validating the monitored domain name.</dd></div>

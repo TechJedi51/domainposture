@@ -1,6 +1,6 @@
 # DomainPosture
 
-DomainPosture 3.3.0 is a focused domain-health dashboard. It combines email posture checks and report analysis with public and origin SSL/TLS certificate monitoring, on-demand DNS and reputation lookups, and optional DNS change alerts. Each domain can enable only the review sections that apply to it, and the Domain Score includes only checks from enabled scored sections.
+DomainPosture 3.4.0 is a focused domain-health dashboard. It combines email posture checks and report analysis with public and origin SSL/TLS certificate monitoring, on-demand DNS and network lookups, and optional DNS change alerts. Each domain can enable only the review sections that apply to it, and the Domain Score includes only checks from enabled scored sections.
 
 The application evolved in place from MailPosture. Existing domains, settings, report data, ParseDMARC configuration, OpenSearch data, snapshots, and Docker volumes remain usable. Some legacy internal names are intentionally retained where renaming them would risk data loss; see [Upgrading from MailPosture](#upgrading-from-mailposture).
 
@@ -11,7 +11,7 @@ The application evolved in place from MailPosture. Existing domains, settings, r
 - SMTP TLS report data from OpenSearch
 - Live MX SMTP reachability, greeting, STARTTLS, certificate trust, and relay behavior
 - Limited IP and domain reputation signals
-- On-demand A, AAAA, CNAME, MX, NS, TXT, CAA, SOA, PTR, TLS-RPT, and reputation lookups
+- On-demand DNS, TLS-RPT, reputation, DNSSEC, RDAP registration, SRV, HTTP/HTTPS, ASN ownership, and restricted TCP-port lookups
 - Optional monitoring and Discord notification for confirmed DNS record changes
 - Public HTTPS certificates resolved through normal DNS
 - Optional origin HTTPS certificates reached at a specific IPv4 or IPv6 address while using the domain for SNI and hostname validation
@@ -105,7 +105,18 @@ Saving Settings validates and writes the settings, secrets, and generated ParseD
 
 ## Lookup Center and DNS change monitoring
 
-The **Lookup Center** at `/tools` accepts a fully qualified host name or an IP address. Host-name lookups show standard DNS records, validate the domain's TLS-RPT record, and run the existing limited reputation checks for the host and its resolved public IP addresses. IP lookups show PTR records and reputation results. Private, loopback, link-local, multicast, and documentation IP addresses are not submitted to DNS blocklists.
+The **Lookup Center** at `/tools` provides a lookup-type menu. The existing overview accepts a fully qualified host name or an IP address. Host-name overviews show standard DNS records, validate the domain's TLS-RPT record, and run the existing limited reputation checks for the host and its resolved public IP addresses. IP overviews show PTR records and reputation results. Private, loopback, link-local, multicast, and documentation IP addresses are not submitted to DNS blocklists.
+
+The additional tools run only when selected:
+
+- **DNSSEC validation** uses Google Public DNS over HTTPS and reports its authenticated-data result with returned DNSKEY and DS records.
+- **Domain registration (RDAP)** uses IANA's RDAP bootstrap registry and the applicable registry's HTTPS RDAP service to show public registrar, status, date, and name-server fields.
+- **SRV record** resolves a complete service name such as `_sip._tcp.example.com` through the configured DNS resolver.
+- **HTTP/HTTPS diagnostics** sends HEAD requests directly to the public endpoints, follows up to three standard-port redirects, and reports status, timing, and selected security headers without downloading page content.
+- **ASN and IP ownership** uses Team Cymru's community DNS service to map public addresses to their BGP origin ASN, prefix, and registry data.
+- **TCP port connectivity** opens one connection to a selected allowlisted port and immediately closes it without sending application data. It does not accept arbitrary ports or connect to private, reserved, or documentation addresses.
+
+The Lookup Center explains the provider or direct connection used before each selected lookup. Selecting and running DNSSEC, RDAP, or ASN lookup sends the entered public target to the named service; web and TCP tools connect directly to the entered public destination.
 
 Reputation results are limited to the providers built into DomainPosture. A provider timeout, refusal, or policy restriction is reported as unavailable and is never treated as a clean result. Lookup results are cached for five minutes, simultaneous identical requests are combined, and each client address is limited to 20 lookup requests per minute.
 
@@ -113,7 +124,7 @@ DNS change monitoring is configured separately for each domain in **Settings →
 
 The first successful observation establishes a baseline and sends no notification. By default, DomainPosture requires the changed value to appear in two consecutive checks before accepting it and sending one Discord notification. The confirmation count is configurable under **Settings → General → Monitoring behavior**. A and AAAA answer order and TTL changes are ignored; SOA monitoring compares the serial number. Disabling a monitor clears its transition state, so re-enabling it establishes a new baseline.
 
-These checks follow the DNS definitions in [RFC 1035](https://www.rfc-editor.org/info/rfc1035/) and TLS reporting record format in [RFC 8460](https://www.rfc-editor.org/info/rfc8460/). DNS blocklist access can be restricted by provider policy; see the [Spamhaus DNSBL usage requirements](https://www.spamhaus.org/faqs/dnsbl-usage/).
+These checks follow the DNS definitions in [RFC 1035](https://www.rfc-editor.org/info/rfc1035/) and TLS reporting record format in [RFC 8460](https://www.rfc-editor.org/info/rfc8460/). DNSSEC validation uses the [Google Public DNS JSON API](https://developers.google.com/speed/public-dns/docs/doh/json), registration discovery uses the [IANA RDAP bootstrap registry](https://www.iana.org/assignments/rdap-dns/rdap-dns.xhtml), and ASN mapping uses [Team Cymru's IP-to-ASN service](https://www.team-cymru.com/ip-asn-mapping). DNS blocklist access can be restricted by provider policy; see the [Spamhaus DNSBL usage requirements](https://www.spamhaus.org/faqs/dnsbl-usage/).
 
 ## Discord notifications
 
@@ -219,7 +230,7 @@ Deprecated `MAILPOSTURE_IMAGE`, `MAILPOSTURE_DISCORD_WEBHOOK`, `MAILPOSTURE_SETT
 
 1. Back up the existing `/data` volume or `${ROOT}/mailposture` directory and the OpenSearch snapshot repository.
 2. Do not delete or recreate Docker volumes, OpenSearch data, or the report mailbox.
-3. Pull or build the DomainPosture 3.3.0 image.
+3. Pull or build the DomainPosture 3.4.0 image.
 4. Keep the existing `mailposture_data` volume or legacy host path during the first upgrade. The supplied Compose defaults do this automatically.
 5. Remove `DOMAINPOSTURE_SECRETS_KEY_FILE` and the Compose `secrets` mount unless you intend to keep using an external key. Then start the updated stack.
 6. Open Settings, create the secrets encryption key, and save the displayed recovery key in a secure password manager.
@@ -231,7 +242,7 @@ Settings are normalized to schema 11 when loaded. Existing domain and report set
 
 The Compose project and service keys, default standalone paths, snapshot repository name, internal ParseDMARC runtime path, internal OpenSearch policy name, compatibility network aliases, and named diagnostic volumes still contain `mailposture`. They are deliberately retained so Compose can recreate the existing service in place and reuse its data. The container name, primary network alias, user-facing branding, preferred environment variables, package metadata, and new files use DomainPosture.
 
-Rollback is to stop the 3.3.0 containers, restore the pre-upgrade `/data` backup, and restart the prior image. Preserve the 3.1 encryption key even after rollback so encrypted secrets can be recovered later.
+Rollback is to stop the 3.4.0 containers, restore the pre-upgrade `/data` backup, and restart the prior image. Preserve the 3.1 encryption key even after rollback so encrypted secrets can be recovered later.
 
 ## Data and privacy
 
@@ -276,7 +287,7 @@ node --check public/app.js
 
 The test suite covers settings migration, section-controlled scoring, public/origin argument construction, encrypted secret round trips, managed-key rotation and interrupted-rotation recovery, SMTP concurrency, shared-MX deduplication, cooldown and 421 backoff, DNS normalization and caching, TLS-RPT lookup validation, DNS change confirmation and notification state, input rejection, JSON normalization, distinct cached paths, status thresholds, forced and scheduled-cache behavior, Discord webhook validation, precedence, test delivery, notification milestones, recovery, UI wiring, container module inclusion, and existing email posture behavior.
 
-The integration follows the current upstream [ssl-watch documentation](https://github.com/idesyatov/ssl-watch) and pins version 1.17.2. Its MIT attribution is retained in `THIRD_PARTY_NOTICES.md`. The project uses semantic versioning; the current DomainPosture minor release is `3.3.0`.
+The integration follows the current upstream [ssl-watch documentation](https://github.com/idesyatov/ssl-watch) and pins version 1.17.2. Its MIT attribution is retained in `THIRD_PARTY_NOTICES.md`. The project uses semantic versioning; the current DomainPosture minor release is `3.4.0`.
 
 ## Repository rename
 

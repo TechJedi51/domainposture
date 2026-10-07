@@ -50,6 +50,38 @@ function score(domain) {
   return domain.checks.length ? Math.round(domain.checks.reduce((total, check) => total + weights[check.status], 0) / domain.checks.length * 100) : 0;
 }
 
+function scoreStatus(value) {
+  const scoreValue = Number(value);
+  return scoreValue >= 90 ? 'healthy' : scoreValue >= 70 ? 'warning' : 'critical';
+}
+
+function emailChecksEnabled(domain) {
+  const sections = { smtp: true, dkim: true, mail_security: true, bimi: true, ...(domain.check_sections || {}) };
+  return ['smtp', 'dkim', 'mail_security', 'bimi'].some(section => sections[section]);
+}
+
+function certificateChecks(domain) {
+  return domain.checks?.find(check => check.id === 'ssl_certificates')?.evidence?.checks || [];
+}
+
+function certificateExpirationDate(value) {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : null;
+}
+
+function domainScoreMetadata(domain) {
+  const mailEnabled = emailChecksEnabled(domain);
+  const threshold = Number(domain.ssl_warning_threshold ?? 30);
+  const certificates = certificateChecks(domain).filter(certificate => ['public', 'origin'].includes(certificate.check_type) && certificateExpirationDate(certificate.not_after));
+  const visibleCertificates = mailEnabled
+    ? certificates.filter(certificate => Number.isFinite(Number(certificate.days_remaining)) && Number(certificate.days_remaining) <= threshold)
+    : certificates;
+  const mail = mailEnabled ? `<span class="domain-mail-host">${esc(mailProfileText(domain.mail_profile || {}))}</span>` : '';
+  const dates = visibleCertificates.map(certificate => `<span class="domain-certificate-date"><b>${certificate.check_type === 'origin' ? 'Origin' : 'Public'} Cert Expiration:</b> ${esc(certificateExpirationDate(certificate.not_after))}</span>`).join('');
+  const unavailable = !mailEnabled && !dates ? '<span class="domain-card-note">Certificate expiration unavailable</span>' : '';
+  return `<div class="domain-score-meta">${mail}${dates}${unavailable}</div>`;
+}
+
 function issuesFor(domain) {
   return domain.checks.filter(check => ['critical', 'warning'].includes(check.status)).sort((a, b) => (a.status === b.status ? 0 : a.status === 'critical' ? -1 : 1));
 }
@@ -159,6 +191,7 @@ function dnsValue(value) {
   if (typeof value === 'string') return value;
   if (value?.address) return `${value.address}${value.ttl !== null && value.ttl !== undefined ? ` · TTL ${value.ttl}s` : ''}`;
   if (value?.exchange) return `${value.priority} ${value.exchange}`;
+  if (value?.name && value?.port !== undefined) return `${value.priority} ${value.weight} ${value.port} ${value.name}`;
   if (value?.nsname) return `${value.nsname} · ${value.hostmaster} · serial ${value.serial} · refresh ${value.refresh}s · retry ${value.retry}s · expire ${value.expire}s · minimum ${value.minttl}s`;
   if (value?.critical !== undefined && value?.issue) return `${value.critical} ${value.issue} ${value.value}`;
   return JSON.stringify(value);
@@ -222,14 +255,14 @@ function renderDashboard() {
   const data = state.data;
   if (!data) return;
   if (data.error && !data.domains.length) {
-    $('#master-score').innerHTML = '<span>Unavailable</span>';
+    $('#master-score').innerHTML = `<span>Unavailable</span><span id="updated" class="master-updated">${esc(ago(data.generated_at))}</span>`;
     $('#domain-scores').innerHTML = `<div class="error">${esc(data.error)}</div>`;
     $('#master-attention').innerHTML = '';
     $('#organization-reports').innerHTML = '';
     return;
   }
   if (!data.domains.length) {
-    $('#master-score').innerHTML = '<strong>—</strong><span>No domains configured</span>';
+    $('#master-score').innerHTML = `<strong>—</strong><span>No domains configured</span><span id="updated" class="master-updated">${esc(ago(data.generated_at))}</span>`;
     $('#domain-scores').innerHTML = '<div class="empty-state"><h3>Add your first domain</h3><p>Configure a domain, its DKIM selectors, and its TLS certificate endpoints.</p><a href="/settings" data-route="/settings">Open Settings →</a></div>';
     $('#master-attention').innerHTML = '<div class="clear">There are no domains to evaluate.</div>';
     $('#organization-reports').innerHTML = '<div class="empty-state"><h3>No report data yet</h3><p>Add a domain and connect a report source.</p></div>';
@@ -239,12 +272,12 @@ function renderDashboard() {
   const domainScores = data.domains.map(score);
   const master = Math.round(domainScores.reduce((total, value) => total + value, 0) / domainScores.length);
   const issueCount = data.domains.reduce((total, domain) => total + issuesFor(domain).length, 0);
-  const masterStatus = data.domains.some(domain => domain.status === 'critical') ? 'critical' : data.domains.some(domain => domain.status === 'warning') ? 'warning' : 'healthy';
-  $('#master-score').innerHTML = `<span class="score-watermark status-symbol ${masterStatus}" aria-hidden="true"></span><div class="score-content"><strong>${master}</strong><span>Master score out of 100</span><div class="bar"><i style="width:${master}%"></i></div></div>`;
+  const masterStatus = scoreStatus(master);
+  $('#master-score').innerHTML = `<span class="score-watermark status-symbol ${masterStatus}" aria-hidden="true"></span><div class="score-content"><strong>${master}</strong><span>Master score out of 100</span><div class="bar"><i style="width:${master}%"></i></div><span id="updated" class="master-updated">${esc(ago(data.generated_at))}</span></div>`;
   $('#domain-scores').innerHTML = data.domains.map((domain, index) => {
     const value = domainScores[index];
     const ignored = domain.counts.ignored ? ` · ${domain.counts.ignored} ignored` : '';
-    return `<button class="domain-score-card" data-open-domain="${index}"><div class="domain-score-top"><span>${statusSymbol(domain.status)}${esc(domain.domain)}</span><span class="state ${domain.status}">${names[domain.status]}</span></div><span class="domain-mail-host">${esc(mailProfileText(domain.mail_profile || {}))}</span><strong>${value}</strong><div class="bar"><i style="width:${value}%"></i></div><p>${domain.counts.critical} critical · ${domain.counts.warning} review${ignored}</p></button>`;
+    return `<button class="domain-score-card" data-open-domain="${index}"><div class="domain-score-top"><span>${statusSymbol(domain.status)}${esc(domain.domain)}</span><span class="state ${domain.status}">${names[domain.status]}</span></div>${domainScoreMetadata(domain)}<strong>${value}</strong><div class="bar"><i style="width:${value}%"></i></div><p>${domain.counts.critical} critical · ${domain.counts.warning} review${ignored}</p></button>`;
   }).join('');
   $('#master-issue-count').textContent = issueCount ? `${issueCount} open` : 'Clear';
   $('#master-attention').innerHTML = issueCount ? data.domains.map((domain, domainIndex) => {
@@ -273,7 +306,6 @@ function certificateControlCard(check, domain) {
 function renderDomain() {
   const data = state.data;
   if (!data) return;
-  $('#updated').textContent = ago(data.generated_at);
   if (data.error && !data.domains.length) {
     $('#hero').innerHTML = '<div><small>Configuration needed</small><h1>Check the saved settings.</h1></div>';
     $('#checks').innerHTML = '';
@@ -312,7 +344,6 @@ function renderDomain() {
 function renderStatus() {
   if (!state.data) return;
   $('#version').textContent = `v${state.data.version || 'unknown'}`;
-  $('#updated').textContent = ago(state.data.generated_at);
   renderDashboard();
   renderDomain();
   renderDomainMenu();
@@ -463,20 +494,53 @@ function renderLookupResults(result) {
   const tls = result.tls_rpt ? `<article class="lookup-summary-card ${esc(result.tls_rpt.status)}"><div>${statusSymbol(result.tls_rpt.status)}</div><section><small>TLS-RPT validation</small><h2>${esc(result.tls_rpt.summary)}</h2><p>${esc(result.tls_rpt.detail)}</p>${result.tls_rpt.evidence?.record ? `<pre>${esc(result.tls_rpt.evidence.record)}</pre>` : ''}</section></article>` : '';
   const reputation = result.reputation || {};
   const reputationChecks = (reputation.evidence?.checks || []).map(check => `<div class="lookup-reputation-row"><span>${statusSymbol(check.status === 'listed' ? 'warning' : check.status === 'clean' ? 'healthy' : 'info')}</span><strong>${esc(check.provider)}</strong><code>${esc(check.target)}</code><em>${esc(check.status)}</em></div>`).join('');
-  const reputationCard = `<article class="lookup-summary-card ${esc(reputation.status || 'info')}"><div>${statusSymbol(reputation.status || 'info')}</div><section><small>Reputation screening</small><h2>${esc(reputation.summary || 'Unavailable')}</h2><p>${esc(reputation.detail || '')}</p>${reputationChecks ? `<div class="lookup-reputation">${reputationChecks}</div>` : ''}</section></article>`;
-  $('#lookup-results').innerHTML = `<div class="lookup-result-heading"><div><small>Lookup result</small><h2>${esc(result.target)}</h2></div><span>${result.cached ? 'Cached result' : result.shared ? 'Shared active lookup' : `Checked ${new Date(result.checked_at).toLocaleString()}`}</span></div><div class="lookup-summary-grid">${tls}${reputationCard}</div><div class="lookup-record-grid">${recordCards}</div>`;
+  const reputationCard = result.reputation ? `<article class="lookup-summary-card ${esc(reputation.status || 'info')}"><div>${statusSymbol(reputation.status || 'info')}</div><section><small>Reputation screening</small><h2>${esc(reputation.summary || 'Unavailable')}</h2><p>${esc(reputation.detail || '')}</p>${reputationChecks ? `<div class="lookup-reputation">${reputationChecks}</div>` : ''}</section></article>` : '';
+  const dnssec = result.dnssec ? `<article class="lookup-summary-card wide ${esc(result.dnssec.status)}"><div>${statusSymbol(result.dnssec.status)}</div><section><small>DNSSEC validation · Google Public DNS</small><h2>${esc(result.dnssec.summary)}</h2><p>${esc(result.dnssec.detail)}</p><div class="lookup-facts"><span><b>Authenticated data</b>${result.dnssec.evidence?.authenticated_data ? 'Yes' : 'No'}</span><span><b>DNSKEY records</b>${number(result.dnssec.evidence?.dnskey?.length || 0)}</span><span><b>DS records</b>${number(result.dnssec.evidence?.ds?.length || 0)}</span></div>${result.dnssec.evidence?.dnskey?.length || result.dnssec.evidence?.ds?.length ? `<details><summary>Show DNSSEC records</summary><pre>${esc([...(result.dnssec.evidence.dnskey || []).map(item => `DNSKEY · ${item.data}`), ...(result.dnssec.evidence.ds || []).map(item => `DS · ${item.data}`)].join('\n'))}</pre></details>` : ''}</section></article>` : '';
+  const registration = result.registration ? `<article class="lookup-summary-card wide ${esc(result.registration.status)}"><div>${statusSymbol(result.registration.status)}</div><section><small>Domain registration · RDAP</small><h2>${esc(result.registration.summary)}</h2><p>${esc(result.registration.detail)}</p><div class="lookup-facts"><span><b>Registrar</b>${esc(result.registration.registrar || 'Not published')}</span><span><b>Registered</b>${esc(lookupDate(result.registration.registered_at))}</span><span><b>Expires</b>${esc(lookupDate(result.registration.expires_at))}</span><span><b>Last changed</b>${esc(lookupDate(result.registration.changed_at))}</span><span><b>Status</b>${esc((result.registration.statuses || []).join(', ') || 'Not published')}</span><span><b>Name servers</b>${esc((result.registration.nameservers || []).join(', ') || 'Not published')}</span></div>${result.registration.source ? `<p class="lookup-source">Source: ${esc(result.registration.source)}</p>` : ''}</section></article>` : '';
+  const ownershipRows = (result.ownership?.records || []).map(record => `<div class="lookup-detail-row"><code>${esc(record.address)}</code><strong>${esc(record.asn || 'Unavailable')}</strong><span>${esc(record.name || record.error || 'No owner name returned')}</span><small>${esc([record.prefix, record.country, record.registry].filter(Boolean).join(' · '))}</small></div>`).join('');
+  const ownership = result.ownership ? `<article class="lookup-summary-card wide ${esc(result.ownership.status)}"><div>${statusSymbol(result.ownership.status)}</div><section><small>ASN and IP ownership · Team Cymru</small><h2>${esc(result.ownership.summary)}</h2><p>${esc(result.ownership.detail)}</p>${ownershipRows ? `<div class="lookup-details">${ownershipRows}</div>` : ''}</section></article>` : '';
+  const webRows = (result.web?.results || []).map(item => `<div class="lookup-detail-row"><code>${esc(item.scheme.toUpperCase())}</code><strong>${item.status === 'available' ? `HTTP ${number(item.status_code)}` : 'Unavailable'}</strong><span>${esc(item.url || item.error || '')}</span><small>${item.status === 'available' ? `${number(item.response_time_ms)} ms · ${number(item.redirects?.length || 0)} redirect${item.redirects?.length === 1 ? '' : 's'}` : ''}</small>${item.status === 'available' ? `<span class="lookup-header-list">${esc(Object.entries(item.headers || {}).filter(([, value]) => value).map(([name]) => name.replaceAll('_', '-')).join(', ') || 'No selected security headers returned')}</span>` : ''}</div>`).join('');
+  const web = result.web ? `<article class="lookup-summary-card wide ${esc(result.web.status)}"><div>${statusSymbol(result.web.status)}</div><section><small>HTTP/HTTPS diagnostics · Direct connection</small><h2>${esc(result.web.summary)}</h2><p>${esc(result.web.detail)}</p><div class="lookup-details">${webRows}</div></section></article>` : '';
+  const tcp = result.tcp ? `<article class="lookup-summary-card wide ${esc(result.tcp.status)}"><div>${statusSymbol(result.tcp.status)}</div><section><small>TCP connectivity · Direct connection</small><h2>${esc(result.tcp.summary)}</h2><p>${esc(result.tcp.detail)}</p><div class="lookup-facts"><span><b>Address</b>${esc(result.tcp.address || 'Not connected')}</span><span><b>Port</b>${number(result.tcp.port)}</span>${result.tcp.response_time_ms !== undefined ? `<span><b>Connection time</b>${number(result.tcp.response_time_ms)} ms</span>` : ''}</div></section></article>` : '';
+  const summaries = `${tls}${reputationCard}${dnssec}${registration}${ownership}${web}${tcp}`;
+  $('#lookup-results').innerHTML = `<div class="lookup-result-heading"><div><small>Lookup result</small><h2>${esc(result.target)}</h2></div><span>${result.cached ? 'Cached result' : result.shared ? 'Shared active lookup' : `Checked ${new Date(result.checked_at).toLocaleString()}`}</span></div>${summaries ? `<div class="lookup-summary-grid">${summaries}</div>` : ''}${recordCards ? `<div class="lookup-record-grid">${recordCards}</div>` : ''}`;
+}
+
+function lookupDate(value) {
+  if (!value) return 'Not published';
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : value;
+}
+
+const lookupToolHelp = {
+  overview: { placeholder: 'example.com', note: 'Uses DomainPosture’s configured DNS resolver and the existing reputation providers. Private, reserved, and documentation addresses are not submitted.' },
+  dnssec: { placeholder: 'example.com', note: 'Sends the domain name to Google Public DNS for validating DNS-over-HTTPS queries. The result shows the authenticated-data flag plus DNSKEY and DS records.' },
+  registration: { placeholder: 'example.com', note: 'Uses IANA’s RDAP bootstrap registry, then sends the domain name to the applicable registry RDAP service. Public registration fields can vary by registry.' },
+  srv: { placeholder: '_sip._tcp.example.com', note: 'Queries the complete SRV record name through DomainPosture’s configured DNS resolver.' },
+  web: { placeholder: 'www.example.com', note: 'Connects directly to the public HTTP and HTTPS endpoints. It sends HEAD requests only and does not download page content.' },
+  asn: { placeholder: '203.0.113.10 or host.example.com', note: 'Sends public IP addresses through DNS to Team Cymru’s community service to identify BGP origin ASN and registry ownership.' },
+  tcp: { placeholder: 'host.example.com', note: 'Opens one connection to the selected public TCP port and immediately closes it. No application data is sent. Private and reserved destinations are blocked.' }
+};
+
+function updateLookupTool() {
+  const tool = $('#lookup-tool').value;
+  const help = lookupToolHelp[tool];
+  $('#lookup-port-field').hidden = tool !== 'tcp';
+  $('#lookup-target').placeholder = help.placeholder;
+  $('#lookup-tool-note').textContent = help.note;
 }
 
 async function runLookup(event) {
   event.preventDefault();
   const button = $('#lookup-form button[type="submit"]');
   const message = $('#lookup-message');
+  const tool = $('#lookup-tool').value;
   button.disabled = true;
   button.textContent = 'Looking up…';
-  message.textContent = 'Querying DNS and available reputation providers…';
+  message.textContent = 'Running the selected lookup…';
   $('#lookup-results').innerHTML = '<div class="clear">Running lookup…</div>';
   try {
-    const response = await fetch('/api/tools/lookup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target: $('#lookup-target').value.trim() }) });
+    const response = await fetch('/api/tools/lookup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ target: $('#lookup-target').value.trim(), tool, tcp_port: tool === 'tcp' ? Number($('#lookup-port').value) : null }) });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Unable to complete the lookup.');
     renderLookupResults(result);
@@ -1083,7 +1147,6 @@ async function showRoute(pathname, push = false) {
   Object.values(viewByRoute).forEach(selector => { $(selector).hidden = selector !== viewByRoute[route]; });
   const quiet = ['/tools', '/settings', '/help'].includes(route);
   $('#refresh').hidden = quiet;
-  $('#updated').hidden = quiet;
   document.querySelectorAll('[data-route]').forEach(link => {
     const active = link.getAttribute('href') === route;
     link.classList.toggle('active', active);
@@ -1116,6 +1179,7 @@ $('#refresh').onclick = async () => {
 $('#settings-form').addEventListener('submit', saveSettings);
 $('#domain-form').addEventListener('submit', saveDomain);
 $('#lookup-form').addEventListener('submit', runLookup);
+$('#lookup-tool').addEventListener('change', updateLookupTool);
 document.querySelectorAll('input[type="checkbox"]').forEach(input => input.setAttribute('role', 'switch'));
 function showSecretsRecoveryKey(result, rotated = false) {
   state.settings.secrets_key = { configured: true, source: result.source, can_generate: false, can_rotate: result.source === 'managed' };
@@ -1392,7 +1456,11 @@ $('#dns-monitor-host').onkeydown = event => { if (event.key === 'Enter') { event
 
 setTheme(localStorage.getItem('domainposture-theme') || localStorage.getItem('mailposture-theme') || 'system', false);
 setDomainSort(state.domainSort, false);
+updateLookupTool();
 showRoute(location.pathname);
 loadStatus();
 loadSystemStatus();
-setInterval(() => { if (state.data) $('#updated').textContent = ago(state.data.generated_at); }, 15000);
+setInterval(() => {
+  const updated = $('#updated');
+  if (state.data && updated) updated.textContent = ago(state.data.generated_at);
+}, 15000);
