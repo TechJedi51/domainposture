@@ -7,6 +7,7 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const applicationBackups = require('./backup');
 const { version: PACKAGE_VERSION } = require('./package.json');
 const { smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validHostname: validSmtpHostname, timingTest: smtpTimingTest, resolveSmtpProfile, smtpProfile } = require('./smtp');
 const { spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp } = require('./dns-security');
@@ -393,7 +394,7 @@ function normalizeSettings(input = {}) {
   const dnsMonitoringEnabled = normalizeDnsMonitoringEnabled(input.dns_monitoring_enabled, domains);
   for (const domain of domains) if (dnsMonitoringEnabled[domain] && !dnsMonitors[domain].length) throw new Error(`Add at least one DNS record to monitor for ${domain}, or switch off DNS change monitoring`);
   return {
-    schema_version: 11,
+    schema_version: 12,
     monitored_domains: domains,
     check_sections: checkSections,
     dkim_selectors: selectors,
@@ -401,6 +402,7 @@ function normalizeSettings(input = {}) {
     certificate_checks: normalizeCertificateChecks(input.certificate_checks, domains, checkSections),
     certificate_check_minutes: boundedNumber(input.certificate_check_minutes, 360, 5, 10080, 'Certificate check interval'),
     notifications: normalizeNotifications(input.notifications),
+    backups: applicationBackups.normalizeBackupSettings(input.backups),
     smtp_profiles: normalizeSmtpProfiles(input.smtp_profiles, domains),
     smtp_probe_hostname: smtpProbeHostname,
     smtp_probe_cooldown_minutes: boundedNumber(input.smtp_probe_cooldown_minutes, 30, 5, 1440, 'SMTP probe cooldown'),
@@ -610,7 +612,7 @@ function getOperationalState() {
   return operationalState;
 }
 
-async function saveOperationalState() {
+async function saveOperationalStateUnlocked() {
   await atomicWrite(STATE_PATH, `${JSON.stringify(getOperationalState(), null, 2)}\n`);
 }
 
@@ -646,6 +648,75 @@ function publicSettings(settings = getSettings()) {
   };
 }
 
+// Serialize complete persistence operations so exports cannot capture a partial
+// settings save or key rotation. A rejected operation must not poison the queue.
+let persistenceQueue = Promise.resolve();
+function withPersistenceLock(operation) {
+  const pending = persistenceQueue.then(operation);
+  persistenceQueue = pending.catch(() => {});
+  return pending;
+}
+
+async function saveSettings(value) {
+  const settings = await withPersistenceLock(() => saveSettingsUnlocked(value));
+  await configureApplicationBackups(settings);
+  return settings;
+}
+function saveOperationalState() { return withPersistenceLock(saveOperationalStateUnlocked); }
+function createManagedSecretsKey(options = {}) { return withPersistenceLock(() => createManagedSecretsKeyUnlocked(options)); }
+function rotateManagedSecretsKey(options = {}) { return withPersistenceLock(() => rotateManagedSecretsKeyUnlocked(options)); }
+
+function captureApplicationBackup() {
+  return withPersistenceLock(async () => {
+    const files = {};
+    const missing = [];
+    const sources = {
+      'settings.json': SETTINGS_PATH,
+      'secrets.json': SECRETS_PATH,
+      'domainposture-state.json': STATE_PATH,
+      'parsedmarc/config.ini': PARSEDMARC_CONFIG_PATH
+    };
+    for (const [name, filename] of Object.entries(sources)) {
+      try {
+        const handle = await fs.promises.open(filename, 'r');
+        try {
+          if ((await handle.stat()).size > 16 * 1024 * 1024) throw new Error('Application file exceeds backup size limit.');
+          files[name] = (await handle.readFile()).toString('base64');
+        } finally { await handle.close(); }
+      } catch (error) {
+        if (error.code !== 'ENOENT' || name === 'settings.json') throw error;
+        missing.push(name);
+      }
+    }
+    // Include the effective recovery key inside the separately encrypted export,
+    // including external keys and an interrupted managed rotation's keyring.
+    const configuration = secretsKeyConfiguration();
+    if (configuration.key) {
+      const encoded = configuration.keys.map(key => key.toString('base64'));
+      const keyFile = encoded.length > 1 ? JSON.stringify({ schema_version: 1, current: encoded[0], previous: encoded.slice(1) }) : encoded[0];
+      files['.domainposture-secrets-key'] = Buffer.from(keyFile + '\n').toString('base64');
+    } else if (files['secrets.json'] && encryptedSecretsDocument(JSON.parse(Buffer.from(files['secrets.json'], 'base64').toString('utf8')))) {
+      throw new Error('Cannot back up encrypted secrets without a recovery key.');
+    }
+    if (files['secrets.json']) {
+      const saved = JSON.parse(Buffer.from(files['secrets.json'], 'base64').toString('utf8'));
+      if (encryptedSecretsDocument(saved)) decryptSecretsWithKeys(saved, configuration.keys);
+    }
+    let logTruncated = false;
+    try {
+      const handle = await fs.promises.open(SERVICE_LOG_PATHS.domainposture, 'r');
+      try {
+        const size = (await handle.stat()).size;
+        const buffer = Buffer.alloc(Math.min(size, 1024 * 1024));
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, Math.max(0, size - buffer.length));
+        files['logs/domainposture.log'] = buffer.subarray(0, bytesRead).toString('base64');
+        logTruncated = size > buffer.length;
+      } finally { await handle.close(); }
+    } catch (error) { if (error.code !== 'ENOENT') throw error; missing.push('logs/domainposture.log'); }
+    return { schema_version: 1, app_version: APP_VERSION, created_at: new Date().toISOString(), files, missing, log_truncated: logTruncated };
+  });
+}
+
 async function atomicWrite(filename, content, mode = 0o600) {
   const temporary = `${filename}.tmp`;
   await fs.promises.mkdir(path.dirname(filename), { recursive: true });
@@ -654,7 +725,7 @@ async function atomicWrite(filename, content, mode = 0o600) {
   await fs.promises.rename(temporary, filename);
 }
 
-async function createManagedSecretsKey(options = {}) {
+async function createManagedSecretsKeyUnlocked(options = {}) {
   const keyPath = options.keyPath || MANAGED_SECRETS_KEY_FILE;
   const secretsPath = options.secretsPath || SECRETS_PATH;
   const current = options.current === undefined ? secretsKeyConfiguration() : options.current;
@@ -675,7 +746,7 @@ async function createManagedSecretsKey(options = {}) {
   return { key: encoded, source: 'managed', migrated_legacy_secrets: Boolean(saved) };
 }
 
-async function rotateManagedSecretsKey(options = {}) {
+async function rotateManagedSecretsKeyUnlocked(options = {}) {
   const keyPath = options.keyPath || MANAGED_SECRETS_KEY_FILE;
   const secretsPath = options.secretsPath || SECRETS_PATH;
   const current = options.current === undefined ? secretsKeyConfiguration() : options.current;
@@ -752,8 +823,12 @@ function getSettings() {
   return runtimeSettings;
 }
 
-async function saveSettings(value) {
+async function saveSettingsUnlocked(value) {
   const settings = normalizeSettings(value);
+  if (settings.backups.enabled) {
+    try { await applicationBackups.readPassword(settings.backups.password_file); }
+    catch (_) { throw new Error('Backup password file must be readable by DomainPosture and contain a separate password of 20 to 1024 bytes.'); }
+  }
   const secrets = readSecrets();
   if (value.mailbox?.password) secrets.imap_password = textValue(value.mailbox.password, '', 4096);
   if (value.mailbox?.clear_password === true) delete secrets.imap_password;
@@ -1742,6 +1817,29 @@ const server = http.createServer(async (req,res) => {
   if (pathname === '/api/settings' && req.method === 'PUT') { try { if (!sameOriginRequest(req)) return json(res, 403, { error: 'Cross-origin requests are not allowed.' }); const settings = await saveSettings(await requestJson(req)); scheduleRefreshAfterSettingsSave(settings); return json(res, 200, { ...settings, refresh_queued: true }); } catch (error) { return json(res, 400, { error: error.message }); } }
   staticFile(req,res);
 });
-function start() { server.listen(PORT,'0.0.0.0',()=>{ console.log(`DomainPosture listening on :${PORT}`); addDiagnosticEvent('domainposture', 'info', 'DomainPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
+let applicationBackupSchedule = null;
+let applicationBackupSignature = null;
+let backupScheduleQueue = Promise.resolve();
+function reportApplicationBackup(level, message) {
+  console[level === 'error' ? 'error' : 'log'](message);
+  addDiagnosticEvent('domainposture', level, message);
+}
+function configureApplicationBackups(settings) {
+  const configuration = applicationBackups.backupConfiguration(settings.backups, process.env.DOMAINPOSTURE_BACKUP_DIR || '/data/backups');
+  const signature = JSON.stringify(configuration);
+  const pending = backupScheduleQueue.then(async () => {
+    if (signature === applicationBackupSignature) return;
+    if (applicationBackupSchedule) await applicationBackupSchedule.stop();
+    applicationBackupSchedule = null;
+    applicationBackupSignature = signature;
+    if (configuration) applicationBackupSchedule = applicationBackups.startBackupSchedule(configuration, captureApplicationBackup, reportApplicationBackup);
+  });
+  backupScheduleQueue = pending.catch(() => {});
+  return pending;
+}
+
+function start() {
+  configureApplicationBackups(getSettings()).catch(() => reportApplicationBackup('error', 'Application backup scheduling failed. Review Settings → General.'));
+  server.listen(PORT,'0.0.0.0',()=>{ console.log(`DomainPosture listening on :${PORT}`); addDiagnosticEvent('domainposture', 'info', 'DomainPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
 if (require.main === module) start();
-module.exports = { assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeControlExceptions, normalizeSmtpProfiles, normalizeCertificateChecks, normalizeCheckSections, normalizeNotifications, normalizeDnsMonitors, normalizeDnsMonitoringEnabled, validDiscordWebhookUrl, discordWebhookConfiguration, decodeSecretsKey, decodeManagedSecretsKeyFile, secretsKeyConfiguration, createManagedSecretsKey, rotateManagedSecretsKey, encryptSecrets, decryptSecrets, decryptSecretsWithKeys, encryptedSecretsDocument, secretsStorageStatus, testDiscordNotification, activeBimiException, applyMissingControlException, isMissingMtaSts, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, domainScore, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, certificate, domainCertificateComponent, processDnsChangeNotifications, processNotifications, sameOriginRequest, refresh, getOperationalState, getSnapshot:()=>snapshot };
+module.exports = { captureApplicationBackup, withPersistenceLock, assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeControlExceptions, normalizeSmtpProfiles, normalizeCertificateChecks, normalizeCheckSections, normalizeNotifications, normalizeDnsMonitors, normalizeDnsMonitoringEnabled, validDiscordWebhookUrl, discordWebhookConfiguration, decodeSecretsKey, decodeManagedSecretsKeyFile, secretsKeyConfiguration, createManagedSecretsKey, rotateManagedSecretsKey, encryptSecrets, decryptSecrets, decryptSecretsWithKeys, encryptedSecretsDocument, secretsStorageStatus, testDiscordNotification, activeBimiException, applyMissingControlException, isMissingMtaSts, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, domainScore, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, certificate, domainCertificateComponent, processDnsChangeNotifications, processNotifications, sameOriginRequest, refresh, getOperationalState, getSnapshot:()=>snapshot };

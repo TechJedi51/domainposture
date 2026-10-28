@@ -21,7 +21,7 @@
   <header>
     <a class="brand" href="/" data-route="/">
       <img src="/domainposture.svg" alt="">
-      <span class="brand-copy"><strong>DomainPosture</strong><small id="version">v3.4.1</small></span>
+      <span class="brand-copy"><strong>DomainPosture</strong><small id="version">v3.5.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
       <a class="toolbar-button" href="/" data-route="/" aria-label="Dashboard" title="Dashboard"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span class="toolbar-label">Dashboard</span></a>
@@ -202,6 +202,18 @@
           <div class="field"><label for="smtp-probe-cooldown">SMTP probe cooldown</label><div class="number-with-unit"><input id="smtp-probe-cooldown" type="number" min="5" max="1440" required><span>minutes</span></div><p>Limits each MX host to one live probe during this period. Shared MX hosts are checked once and reused across domains.</p></div>
           <div class="field"><label for="dns-change-confirmations">Confirm DNS changes after</label><div class="number-with-unit"><input id="dns-change-confirmations" type="number" min="1" max="5" required><span>checks</span></div><p>Two consecutive observations reduce alerts caused by transient DNS answers.</p></div>
           <div class="field"><label for="smtp-probe-hostname">SMTP probe hostname</label><input id="smtp-probe-hostname" type="text" placeholder="probe.example.com"><p>Optional. Use a public hostname whose A/AAAA and PTR records identify this DomainPosture probe. When blank, DomainPosture sends its local address as an SMTP address literal.</p></div>
+        </div>
+        <div class="settings-panel">
+          <div><h2>Application backups</h2><p>Create encrypted recovery files in the backups folder for DBackup or another backup service to collect.</p></div>
+          <label class="toggle"><input id="backup-enabled" type="checkbox" aria-controls="backup-fields"><span>Enable scheduled application backups</span></label>
+          <div id="backup-fields" class="nested-settings">
+            <div class="field"><label for="backup-password-file">Backup password file</label><input id="backup-password-file" type="text" autocomplete="off" placeholder="/run/secrets/domainposture_backup_password" aria-describedby="backup-password-help"><p id="backup-password-help">Enter the file path inside the application system. Mount a separate password file read-only and save its password in 1Password. Use at least 20 bytes. The application secrets key is not the backup password.</p></div>
+            <div class="two-fields">
+              <div class="field"><label for="backup-hour-utc">Daily backup hour (UTC)</label><input id="backup-hour-utc" type="number" min="0" max="23" step="1" required><p>0–23, on the hour. Enabling backups also creates an initial export.</p></div>
+              <div class="field"><label for="backup-keep">Exports to keep</label><input id="backup-keep" type="number" min="1" max="365" step="1" required><p>Older exports are removed after a new export succeeds.</p></div>
+            </div>
+          </div>
+          <p class="settings-note">Save settings to apply changes without restarting. Exports include recovery secrets and the last 1 MiB of the application log, protected by the separate backup password. OpenSearch reports need their own backup.</p>
         </div>
         <div class="settings-panel key-setup">
           <div><h2>Secrets encryption</h2><p>Protect the Discord webhook and report-mailbox password saved by DomainPosture.</p></div>

@@ -19,7 +19,7 @@ async function run(){
   assert.deepStrictEqual(settings.monitored_domains,['example.com']);
   assert.strictEqual(settings.opensearch_enabled,true);
   assert.strictEqual(settings.report_source,'standalone');
-  assert.strictEqual(settings.schema_version,11);
+  assert.strictEqual(settings.schema_version,12);
   assert.deepStrictEqual(settings.check_sections['example.com'],{domain_certificates:true,additional_tls:true,smtp:true,dkim:true,mail_security:true,bimi:true});
   assert.deepStrictEqual(settings.certificate_checks['example.com'],{check_public:true,check_origin:false,origin_ip:''});
   assert.strictEqual(settings.certificate_check_minutes,360);
@@ -485,7 +485,7 @@ async function run(){
   assert.strictEqual(shards.affected_report_shards,0);
   assert.strictEqual(shards.groups.find(group=>group.category==='OpenSearch security audit logs').unassigned_shards,1);
   process.env.DEMO_MODE='true';const status=await app.refresh();assert.strictEqual(status.domains.length,1);assert.ok(status.summary.critical>0);assert.strictEqual(status.version,require('../package.json').version);assert.strictEqual(status.domains[0].mail_profile.provider,'self_hosted');
-  assert.strictEqual(require('../package.json').version,'3.4.1');
+  assert.strictEqual(require('../package.json').version,'3.5.0');
   const page=fs.readFileSync('public/index.html','utf8'),client=fs.readFileSync('public/app.js','utf8'),styles=fs.readFileSync('public/settings.css','utf8'),icon=fs.readFileSync('public/domainposture.svg','utf8'),standalone=fs.readFileSync('compose.standalone.yml','utf8'),dockerfile=fs.readFileSync('Dockerfile','utf8'),smtpSource=fs.readFileSync('smtp.js','utf8'),dnsToolsSource=fs.readFileSync('dns-tools.js','utf8'),networkToolsSource=fs.readFileSync('network-tools.js','utf8'),serverSource=fs.readFileSync('server.js','utf8');
   assert.match(page,/DomainPosture/);
   assert.match(page,/id="dashboard-view"/);
@@ -513,7 +513,7 @@ async function run(){
   assert.match(page,/id="log-service"/);
   assert.match(page,/id="service-log"/);
   assert.match(page,/id="service-log-service"/);
-  assert.match(page,/v3\.4\.1/);
+  assert.match(page,/v3\.5\.0/);
   assert.match(page,/Domain Health Dashboard/);
   assert.doesNotMatch(page,/DMARC authentication and SMTP TLS delivery results for the selected history window/);
   assert.match(page,/id="domain-menu-button"/);
@@ -679,7 +679,7 @@ async function run(){
   assert.match(dockerfile,/dns-security\.js/);
   assert.match(dockerfile,/ssl-monitor\.js/);
   assert.match(dockerfile,/ghcr\.io\/idesyatov\/ssl-watch:v\$\{SSL_WATCH_VERSION\}/);
-  assert.match(dockerfile,/org\.opencontainers\.image\.version="3\.4\.1"/);
+  assert.match(dockerfile,/org\.opencontainers\.image\.version="3\.5\.0"/);
   assert.match(smtpSource,/RCPT TO:<probe@example\.net>/);
   assert.doesNotMatch(smtpSource,/command\(['"]DATA/);
   assert.match(smtpSource,/policyBlock/);

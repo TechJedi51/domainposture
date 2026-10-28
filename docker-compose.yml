@@ -18,6 +18,7 @@ services:
       OPENSEARCH_PASSWORD: ${OPENSEARCH_PASSWORD:-}
       OPENSEARCH_VERIFY_TLS: ${OPENSEARCH_VERIFY_TLS:-false}
       SERVICE_LOGS_ENABLED: ${SERVICE_LOGS_ENABLED:-false}
+      DOMAINPOSTURE_BACKUP_DIR: /data/backups
     volumes:
       - mailposture_data:/data:rw
     expose:

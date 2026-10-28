@@ -1,6 +1,6 @@
 # DomainPosture
 
-DomainPosture 3.4.1 is a focused domain-health dashboard. It combines email posture checks and report analysis with public and origin SSL/TLS certificate monitoring, on-demand DNS and network lookups, and optional DNS change alerts. Each domain can enable only the review sections that apply to it, and the Domain Score includes only checks from enabled scored sections.
+DomainPosture 3.5.0 is a focused domain-health dashboard. It combines email posture checks and report analysis with public and origin SSL/TLS certificate monitoring, on-demand DNS and network lookups, and optional DNS change alerts. Each domain can enable only the review sections that apply to it, and the Domain Score includes only checks from enabled scored sections.
 
 The application evolved in place from MailPosture. Existing domains, settings, report data, ParseDMARC configuration, OpenSearch data, snapshots, and Docker volumes remain usable. Some legacy internal names are intentionally retained where renaming them would risk data loss; see [Upgrading from MailPosture](#upgrading-from-mailposture).
 
@@ -230,7 +230,7 @@ Deprecated `MAILPOSTURE_IMAGE`, `MAILPOSTURE_DISCORD_WEBHOOK`, `MAILPOSTURE_SETT
 
 1. Back up the existing `/data` volume or `${ROOT}/mailposture` directory and the OpenSearch snapshot repository.
 2. Do not delete or recreate Docker volumes, OpenSearch data, or the report mailbox.
-3. Pull or build the DomainPosture 3.4.1 image.
+3. Pull or build the DomainPosture 3.5.0 image.
 4. Keep the existing `mailposture_data` volume or legacy host path during the first upgrade. The supplied Compose defaults do this automatically.
 5. Remove `DOMAINPOSTURE_SECRETS_KEY_FILE` and the Compose `secrets` mount unless you intend to keep using an external key. Then start the updated stack.
 6. Open Settings, create the secrets encryption key, and save the displayed recovery key in a secure password manager.
@@ -238,11 +238,11 @@ Deprecated `MAILPOSTURE_IMAGE`, `MAILPOSTURE_DISCORD_WEBHOOK`, `MAILPOSTURE_SETT
 8. Save Settings, then confirm `/healthz`, **System Status**, the saved domain list, report counts, and a manual certificate check.
 9. Configure origin certificate paths only after confirming their intended IP addresses.
 
-Settings are normalized to schema 11 when loaded. Existing domain and report settings are preserved, and existing installations receive a 30-minute SMTP probe cooldown. Every existing domain receives all six check sections enabled, public certificate monitoring enabled, origin monitoring disabled unless those settings already exist, and DNS change monitoring disabled until it is explicitly configured. Saving Settings writes the normalized schema atomically.
+Settings are normalized to schema 12 when loaded. Existing domain and report settings are preserved, and existing installations receive a 30-minute SMTP probe cooldown. Every existing domain receives all six check sections enabled, public certificate monitoring enabled, origin monitoring disabled unless those settings already exist, and DNS change monitoring disabled until it is explicitly configured. Saving Settings writes the normalized schema atomically.
 
 The Compose project and service keys, default standalone paths, snapshot repository name, internal ParseDMARC runtime path, internal OpenSearch policy name, compatibility network aliases, and named diagnostic volumes still contain `mailposture`. They are deliberately retained so Compose can recreate the existing service in place and reuse its data. The container name, primary network alias, user-facing branding, preferred environment variables, package metadata, and new files use DomainPosture.
 
-Rollback is to stop the 3.4.1 containers, restore the pre-upgrade `/data` backup, and restart the prior image. Preserve the 3.1 encryption key even after rollback so encrypted secrets can be recovered later.
+Rollback is to stop the 3.5.0 containers, restore the pre-upgrade `/data` backup, and restart the prior image. Preserve the 3.1 encryption key even after rollback so encrypted secrets can be recovered later.
 
 ## Data and privacy
 
@@ -258,6 +258,114 @@ Rollback is to stop the 3.4.1 containers, restore the pre-upgrade `/data` backup
 - Service log views use a fixed service list, bounded reads, and redaction as defense in depth. Review logs before sharing them.
 
 The application writes settings, operational state, generated ParseDMARC configuration, logs when enabled, and OpenSearch snapshot policy configuration. It does not modify DNS. The container uses a read-only root filesystem, drops Linux capabilities, has no Docker socket, and uses `/data` as its writable application mount.
+
+## Scheduled encrypted application exports
+
+DomainPosture can publish portable encrypted exports in `/data/backups`, which is
+`domainposture/backups` when your host DomainPosture directory is mounted at `/data`.
+This is opt-in and does not change the permissions of live application files.
+DBackup can collect only this directory instead of trying to read protected live files.
+
+Create a separate, randomly generated backup password of at least 20 bytes, save it
+in 1Password, and supply it through a protected file mounted read-only into the
+DomainPosture container. Do not use the application secrets encryption key as this
+password. Do not store the password file in `/data` or include it in the DBackup job.
+No 1Password integration or automatic password retrieval is required by this feature.
+
+For example, add this bind mount to the existing DomainPosture service, using a real
+absolute host path outside the application data directory:
+
+```yaml
+volumes:
+  - type: bind
+    source: /secure/domainposture-backup-password
+    target: /run/secrets/domainposture_backup_password
+    read_only: true
+```
+
+Keep that host file readable by DomainPosture's container user and restrict access
+by other accounts. In **Settings → General → Application backups**, configure:
+
+- **Enable scheduled application backups** (off by default).
+- **Backup password file**: the mounted path inside the application system, such as
+  `/run/secrets/domainposture_backup_password`. This stores the path, not the password.
+- **Daily backup hour (UTC)**: 0–23; defaults to 2 (02:00 UTC).
+- **Exports to keep**: 1–365; defaults to seven.
+
+Save settings to apply changes immediately without restarting. These four controls
+are stored in `settings.json`; the former `DOMAINPOSTURE_BACKUP_ENABLED`,
+`DOMAINPOSTURE_BACKUP_PASSWORD_FILE`, `DOMAINPOSTURE_BACKUP_HOUR_UTC`, and
+`DOMAINPOSTURE_BACKUP_KEEP` environment variables no longer control backups. Move
+any existing values into Settings. The password file mount remains a deployment
+prerequisite; entering its path does not create or mount a file. An enabled backup
+configuration is checked for a readable password file before settings are saved.
+
+Exports run when enabled or reconfigured, at application startup when enabled, and
+daily at the selected UTC hour, with no external scheduler or ACL tools. Unrelated
+settings saves do not trigger another export. Disabling backups cancels future
+runs and waits for an in-progress export to finish. Startup and reconfiguration
+exports count toward retention. Missed runs while stopped are not replayed. Native
+deployments can set `DOMAINPOSTURE_BACKUP_DIR`; Docker Compose uses `/data/backups`.
+
+The application key (`.domainposture-secrets-key`) encrypts saved application
+secrets. It does **not** encrypt `.dpbackup` exports. Exports use the independent
+backup password because they include a recovery copy of the application key.
+
+Each `.dpbackup` contains settings, saved secrets, available operational state,
+available generated ParseDMARC configuration, and the effective secrets recovery
+key, including an external key when configured. A present DomainPosture log is
+included up to its final 1 MiB; `log_truncated` records whether earlier bytes were
+omitted. Missing optional files are listed in the encrypted manifest. Settings must
+exist, so save the initial settings before expecting a successful export.
+
+Exports serialize with application writes to avoid capturing half of a settings
+save or managed key rotation. They are compressed and authenticated with AES-256-GCM;
+a fresh salt and nonce are generated for each export and the password key is derived
+with scrypt (N=32768, r=8, p=1). Only ciphertext is written to the backup directory.
+A successful export is authenticated before publication; older exports are removed
+only after publication. Only filenames matching the application's export pattern
+are considered for retention. Temporary files are not backups; configure DBackup
+to select `*.dpbackup` and ignore `*.tmp`.
+
+Encrypted exports use mode `0644` and newly created backup directories use `0755`,
+allowing DBackup UID 1002 to read them without access to live secrets. Existing
+ancestor/directory permissions or platform ACLs may still require a one-time
+read/traverse grant on the backup directory. On systems without POSIX modes, use the
+platform's directory permissions. The export password must remain inaccessible to
+backup readers: it decrypts both the saved secrets and their recovery key. Retain
+old passwords in 1Password while older exports still need them.
+
+The export does **not** include the backup password, deployment `.env`, Compose
+files, arbitrary environment variables, OpenSearch report indexes, or OpenSearch
+snapshots. Preserve deployment configuration securely and back up OpenSearch with
+its snapshot workflow. Generated `config.ini` includes plaintext service passwords
+inside the encrypted export. Live files remain owner-only. Export input is limited
+to 16 MiB per configuration/state file and a 64 MiB JSON payload; exceeding these
+limits produces a reported failure rather than a partial export.
+
+### Recover an application export
+
+Keep a copy of `backup.js` with your recovery documentation. It uses only built-in
+Node.js modules (Node.js 20 or later) and works without the running application.
+Use the matching password file and a **new, nonexistent output directory**:
+
+```sh
+node backup.js recover /backups/example.dpbackup /secure/backup-password /restore/domainposture
+```
+
+Recovery authenticates the archive before extracting any files, refuses an existing
+output directory, and writes recovered files owner-only. Test recovery in a separate
+location before relying on the backup. Inspect the encrypted manifest through the
+export's recovery code if you need missing-file or log-truncation details.
+
+For a live restore, stop DomainPosture and the collector, preserve the existing data,
+and copy the recovered files into `/data` with ownership matching the application
+user. Restore external secrets keys to their separately mounted location, or remove
+the external-key override and use the recovered managed key; environment/external
+keys take precedence over the managed key. Restore deployment credentials and
+OpenSearch separately. Restart and verify settings, secret availability, and report
+collection. Roll back by stopping the services and restoring the preserved data and
+deployment configuration. No automatic live restore is performed.
 
 ## Health and troubleshooting
 
@@ -287,7 +395,7 @@ node --check public/app.js
 
 The test suite covers settings migration, section-controlled scoring, public/origin argument construction, encrypted secret round trips, managed-key rotation and interrupted-rotation recovery, SMTP concurrency, shared-MX deduplication, cooldown and 421 backoff, DNS normalization and caching, TLS-RPT lookup validation, DNS change confirmation and notification state, input rejection, JSON normalization, distinct cached paths, status thresholds, forced and scheduled-cache behavior, Discord webhook validation, precedence, test delivery, notification milestones, recovery, UI wiring, container module inclusion, and existing email posture behavior.
 
-The integration follows the current upstream [ssl-watch documentation](https://github.com/idesyatov/ssl-watch) and pins version 1.17.2. Its MIT attribution is retained in `THIRD_PARTY_NOTICES.md`. The project uses semantic versioning; the current DomainPosture release is `3.4.1`.
+The integration follows the current upstream [ssl-watch documentation](https://github.com/idesyatov/ssl-watch) and pins version 1.17.2. Its MIT attribution is retained in `THIRD_PARTY_NOTICES.md`. The project uses semantic versioning; the current DomainPosture release is `3.5.0`.
 
 ## Repository rename
 

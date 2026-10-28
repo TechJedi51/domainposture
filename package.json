@@ -1,9 +1,9 @@
 {
   "name": "domainposture",
-  "version": "3.4.1",
+  "version": "3.5.0",
   "private": true,
   "description": "Actionable domain, email, and certificate health monitoring",
   "main": "server.js",
-  "scripts": { "start": "node server.js", "test": "node test/server.test.js" },
+  "scripts": { "start": "node server.js", "test": "node test/backup.test.js && node test/backup-settings.test.js && node test/server.test.js" },
   "engines": { "node": ">=20" }
 }

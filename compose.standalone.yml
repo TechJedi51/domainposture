@@ -21,6 +21,7 @@ services:
       OPENSEARCH_PASSWORD: ${OPENSEARCH_INITIAL_ADMIN_PASSWORD:?Set the OpenSearch administrator password}
       OPENSEARCH_VERIFY_TLS: "false"
       SERVICE_LOGS_ENABLED: "true"
+      DOMAINPOSTURE_BACKUP_DIR: /data/backups
     volumes:
       - type: bind
         source: ${DOMAINPOSTURE_SETTINGS_PATH:-${MAILPOSTURE_SETTINGS_PATH:-${ROOT:?Set ROOT to the parent directory for persistent application data}/mailposture/settings}}

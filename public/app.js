@@ -628,6 +628,10 @@ async function loadSettings() {
   renderSecretsKeySettings(settings);
   $('#report-days').value = settings.report_days;
   $('#refresh-minutes').value = settings.refresh_minutes;
+  $('#backup-enabled').checked = settings.backups.enabled;
+  $('#backup-password-file').value = settings.backups.password_file;
+  $('#backup-hour-utc').value = settings.backups.hour_utc;
+  $('#backup-keep').value = settings.backups.keep;
   $('#certificate-check-minutes').value = settings.certificate_check_minutes;
   $('#request-timeout').value = settings.request_timeout_ms;
   $('#smtp-probe-cooldown').value = settings.smtp_probe_cooldown_minutes;
@@ -1021,6 +1025,12 @@ async function saveSettings(event) {
       ...state.settings,
       report_days: Number($('#report-days').value),
       refresh_minutes: Number($('#refresh-minutes').value),
+      backups: {
+        enabled: $('#backup-enabled').checked,
+        password_file: $('#backup-password-file').value.trim(),
+        hour_utc: Number($('#backup-hour-utc').value),
+        keep: Number($('#backup-keep').value)
+      },
       certificate_check_minutes: Number($('#certificate-check-minutes').value),
       request_timeout_ms: Number($('#request-timeout').value),
       smtp_probe_cooldown_minutes: Number($('#smtp-probe-cooldown').value),
