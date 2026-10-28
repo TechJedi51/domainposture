@@ -20,6 +20,7 @@ const SETTINGS_PATH = process.env.DOMAINPOSTURE_SETTINGS_FILE || process.env.SET
 const SECRETS_PATH = process.env.DOMAINPOSTURE_SECRETS_FILE || process.env.SECRETS_PATH || '/data/secrets.json';
 const SECRETS_KEY_FILE = process.env.DOMAINPOSTURE_SECRETS_KEY_FILE || '/run/secrets/domainposture_secrets_key';
 const MANAGED_SECRETS_KEY_FILE = process.env.DOMAINPOSTURE_MANAGED_SECRETS_KEY_FILE || '/data/.domainposture-secrets-key';
+const MANAGED_BACKUP_PASSWORD_FILE = process.env.DOMAINPOSTURE_MANAGED_BACKUP_PASSWORD_FILE || '/data/.domainposture-backup-password';
 const STATE_PATH = process.env.DOMAINPOSTURE_STATE_PATH || '/data/domainposture-state.json';
 const PARSEDMARC_CONFIG_PATH = process.env.PARSEDMARC_CONFIG_PATH || '/data/parsedmarc/config.ini';
 const PARSEDMARC_STATUS_PATH = process.env.PARSEDMARC_STATUS_PATH || '/run/parsedmarc/status.json';
@@ -644,6 +645,7 @@ function publicSettings(settings = getSettings()) {
     ...settings,
     mailbox: { ...settings.mailbox, password: '', password_set: Boolean(secrets.imap_password) },
     notifications: { ...settings.notifications, discord_webhook_configured: Boolean(discord.url), discord_webhook_source: discord.source },
+    backup_password: backupPasswordStatus(settings),
     secrets_key: { configured: Boolean(keyConfiguration.key), source: keyConfiguration.source, can_generate: !keyConfiguration.key, can_rotate: keyConfiguration.source === 'managed' }
   };
 }
@@ -665,6 +667,45 @@ async function saveSettings(value) {
 function saveOperationalState() { return withPersistenceLock(saveOperationalStateUnlocked); }
 function createManagedSecretsKey(options = {}) { return withPersistenceLock(() => createManagedSecretsKeyUnlocked(options)); }
 function rotateManagedSecretsKey(options = {}) { return withPersistenceLock(() => rotateManagedSecretsKeyUnlocked(options)); }
+
+function backupPasswordStatus(settings = getSettings()) {
+  const external = Boolean(settings.backups.password_file);
+  const filename = settings.backups.password_file || MANAGED_BACKUP_PASSWORD_FILE;
+  try {
+    const stat = fs.statSync(filename);
+    if (!stat.isFile() || stat.size < 20 || stat.size > 4096) return { configured: false, source: external ? 'external' : 'managed', can_generate: false, can_rotate: false, error: 'The backup password file is invalid. Restore the original working copy.' };
+    return { configured: true, source: external ? 'external' : 'managed', can_generate: false, can_rotate: !external };
+  } catch (error) {
+    if (error.code === 'ENOENT') return { configured: false, source: external ? 'external' : null, can_generate: !external, can_rotate: false };
+    return { configured: false, source: external ? 'external' : 'managed', can_generate: false, can_rotate: false, error: 'The backup password file is unavailable. Check its access permissions.' };
+  }
+}
+
+async function generateBackupPassword(rotate = false) {
+  const result = await withPersistenceLock(async () => {
+    const settings = getSettings();
+    if (settings.backups.password_file) throw new Error('An external backup password is configured. Manage it in the deployment system.');
+    const status = backupPasswordStatus(settings);
+    if (rotate) {
+      if (!status.can_rotate) throw new Error('Create a managed backup password before rotating it.');
+      // Do not silently replace a damaged or inaccessible working copy.
+      await applicationBackups.readPassword(MANAGED_BACKUP_PASSWORD_FILE);
+    } else if (!status.can_generate) {
+      throw new Error('A managed backup password already exists or is unavailable. It will not be replaced.');
+    }
+    const password = crypto.randomBytes(32).toString('base64');
+    if (rotate) await atomicWrite(MANAGED_BACKUP_PASSWORD_FILE, password + '\n');
+    else {
+      await fs.promises.mkdir(path.dirname(MANAGED_BACKUP_PASSWORD_FILE), { recursive: true });
+      await fs.promises.writeFile(MANAGED_BACKUP_PASSWORD_FILE, password + '\n', { flag: 'wx', mode: 0o600 });
+    }
+    addDiagnosticEvent('domainposture', 'info', rotate ? 'Backup password rotated' : 'Backup password created', 'Remember to save in 1Password.');
+    return { password, source: 'managed', rotated: rotate };
+  });
+  // Re-arm the schedule after creation or rotation, even if the settings are unchanged.
+  await configureApplicationBackups(getSettings(), true);
+  return result;
+}
 
 function captureApplicationBackup() {
   return withPersistenceLock(async () => {
@@ -826,8 +867,8 @@ function getSettings() {
 async function saveSettingsUnlocked(value) {
   const settings = normalizeSettings(value);
   if (settings.backups.enabled) {
-    try { await applicationBackups.readPassword(settings.backups.password_file); }
-    catch (_) { throw new Error('Backup password file must be readable by DomainPosture and contain a separate password of 20 to 1024 bytes.'); }
+    try { await applicationBackups.readPassword(settings.backups.password_file || MANAGED_BACKUP_PASSWORD_FILE); }
+    catch (_) { throw new Error('Create a backup password in General settings, or provide a readable external password file containing 20 to 1024 bytes.'); }
   }
   const secrets = readSecrets();
   if (value.mailbox?.password) secrets.imap_password = textValue(value.mailbox.password, '', 4096);
@@ -1811,6 +1852,11 @@ const server = http.createServer(async (req,res) => {
     return json(res, 202, await refresh({ domain, forceCertificates: true }));
   }
   if (pathname === '/api/settings' && req.method === 'GET') { try { return json(res, 200, publicSettings()); } catch (error) { return json(res, 500, { error: error.message }); } }
+  if ((pathname === '/api/backup-password' || pathname === '/api/backup-password/rotate') && req.method === 'POST') {
+    if (!sameOriginRequest(req)) return json(res, 403, { error: 'Cross-origin requests are not allowed.' });
+    try { return json(res, pathname.endsWith('/rotate') ? 200 : 201, await generateBackupPassword(pathname.endsWith('/rotate'))); }
+    catch (_) { return json(res, 409, { error: 'Unable to create or rotate the backup password. Check the configured password source, working copy, and storage access.' }); }
+  }
   if (pathname === '/api/secrets-key' && req.method === 'POST') { try { if (!sameOriginRequest(req)) return json(res, 403, { error: 'Cross-origin requests are not allowed.' }); return json(res, 201, await createManagedSecretsKey()); } catch (error) { return json(res, 409, { error: error.message }); } }
   if (pathname === '/api/secrets-key/rotate' && req.method === 'POST') { try { if (!sameOriginRequest(req)) return json(res, 403, { error: 'Cross-origin requests are not allowed.' }); return json(res, 200, await rotateManagedSecretsKey()); } catch (error) { return json(res, 409, { error: error.message }); } }
   if (pathname === '/api/notifications/discord/test' && req.method === 'POST') { try { if (!sameOriginRequest(req)) return json(res, 403, { error: 'Cross-origin requests are not allowed.' }); return json(res, 200, await testDiscordNotification()); } catch (error) { return json(res, error.statusCode || 502, { error: error.message }); } }
@@ -1824,11 +1870,11 @@ function reportApplicationBackup(level, message) {
   console[level === 'error' ? 'error' : 'log'](message);
   addDiagnosticEvent('domainposture', level, message);
 }
-function configureApplicationBackups(settings) {
-  const configuration = applicationBackups.backupConfiguration(settings.backups, process.env.DOMAINPOSTURE_BACKUP_DIR || '/data/backups');
+function configureApplicationBackups(settings, force = false) {
+  const configuration = applicationBackups.backupConfiguration(settings.backups, process.env.DOMAINPOSTURE_BACKUP_DIR || '/data/backups', MANAGED_BACKUP_PASSWORD_FILE);
   const signature = JSON.stringify(configuration);
   const pending = backupScheduleQueue.then(async () => {
-    if (signature === applicationBackupSignature) return;
+    if (!force && signature === applicationBackupSignature) return;
     if (applicationBackupSchedule) await applicationBackupSchedule.stop();
     applicationBackupSchedule = null;
     applicationBackupSignature = signature;

@@ -79,14 +79,13 @@ function normalizeBackupSettings(input = {}) {
   const passwordFile = (input.password_file || '').trim();
   if (passwordFile && (!path.isAbsolute(passwordFile) || passwordFile.includes('\0') || passwordFile.length > 4096)) throw new Error('Backup password file must be an absolute path on the application system.');
   const settings = { enabled: input.enabled === true, password_file: passwordFile, hour_utc: integer('hour_utc', 2, 0, 23), keep: integer('keep', 7, 1, 365) };
-  if (settings.enabled && !settings.password_file) throw new Error('Choose a backup password file before enabling backups.');
   return settings;
 }
 
-function backupConfiguration(settings, directory = '/data/backups') {
+function backupConfiguration(settings, directory = '/data/backups', managedPasswordFile = '/data/.domainposture-backup-password') {
   const backup = normalizeBackupSettings(settings);
   if (!backup.enabled) return null;
-  return { directory, passwordFile: backup.password_file, hour: backup.hour_utc, retain: backup.keep };
+  return { directory, passwordFile: backup.password_file || managedPasswordFile, hour: backup.hour_utc, retain: backup.keep };
 }
 
 async function createBackup({ directory, passwordFile, retain }, snapshot) {

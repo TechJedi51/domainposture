@@ -7,6 +7,7 @@ const net = require('net');
 const { spawn } = require('child_process');
 const { once } = require('events');
 const app = require('../server');
+const backup = require('../backup');
 
 async function waitFor(check) {
   const deadline = Date.now() + 10000;
@@ -38,6 +39,7 @@ async function run() {
     PARSEDMARC_CONFIG_PATH: path.join(root, 'parsedmarc/config.ini'),
     DOMAINPOSTURE_LOG_PATH: path.join(root, 'missing.log'),
     DOMAINPOSTURE_BACKUP_DIR: directory,
+    DOMAINPOSTURE_MANAGED_BACKUP_PASSWORD_FILE: path.join(root, '.domainposture-backup-password'),
     // Legacy environment controls must not override saved settings.
     DOMAINPOSTURE_BACKUP_ENABLED: 'true', DOMAINPOSTURE_BACKUP_PASSWORD_FILE: passwordFile,
     DOMAINPOSTURE_BACKUP_HOUR_UTC: '23', DOMAINPOSTURE_BACKUP_KEEP: '99'
@@ -104,6 +106,57 @@ async function run() {
     await launch();
     assert.strictEqual((await get()).backups.enabled, false);
     assert.strictEqual((await exports()).length, 3, 'disabled settings survive restart');
+    // Existing external-password deployments remain read-only to management actions.
+    let response = await fetch(base + '/api/backup-password', { method: 'POST', headers: { origin: base } });
+    assert.strictEqual(response.status, 409);
+    result = await save({ ...(await get()), backups: { ...(await get()).backups, enabled: false, password_file: '' } });
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual((await get()).backup_password.can_generate, true);
+    response = await fetch(base + '/api/backup-password', { method: 'POST', headers: { origin: 'https://untrusted.example' } });
+    assert.strictEqual(response.status, 403);
+    response = await fetch(base + '/api/backup-password', { method: 'POST', headers: { origin: base } });
+    assert.strictEqual(response.status, 201);
+    const generated = await response.json();
+    assert.strictEqual(Buffer.from(generated.password, 'base64').length, 32);
+    const managedFile = path.join(root, '.domainposture-backup-password');
+    assert.strictEqual((await fs.readFile(managedFile, 'utf8')).trim(), generated.password);
+    if (process.platform !== 'win32') assert.strictEqual((await fs.stat(managedFile)).mode & 0o777, 0o600);
+    settings = await get();
+    assert.strictEqual(settings.backup_password.source, 'managed');
+    assert.strictEqual(settings.backup_password.can_rotate, true);
+    assert(!JSON.stringify(settings).includes(generated.password));
+    assert.strictEqual(settings.backups.enabled, false, 'creation does not enable exports');
+    response = await fetch(base + '/api/backup-password', { method: 'POST', headers: { origin: base } });
+    assert.strictEqual(response.status, 409, 'duplicate creation never replaces the password');
+    assert.strictEqual((await fs.readFile(managedFile, 'utf8')).trim(), generated.password);
+    const beforeManaged = await exports();
+    result = await save({ ...settings, backups: { ...settings.backups, enabled: true } });
+    assert.strictEqual(result.status, 200);
+    const managedName = await waitFor(async () => (await exports()).find(name => !beforeManaged.includes(name)));
+    const originalArchive = await fs.readFile(path.join(directory, managedName), 'utf8');
+    const originalPayload = await backup.decryptBackup(originalArchive, generated.password);
+    assert(!JSON.stringify(originalPayload).includes(generated.password));
+    assert(!Object.hasOwn(originalPayload.files, '.domainposture-backup-password'));
+    await stop();
+    await launch();
+    assert.strictEqual((await get()).backup_password.source, 'managed');
+    // Ensure the startup export has completed before checking rotation.
+    await waitFor(async () => output.includes('Encrypted application backup created'));
+    const beforeRotate = await exports();
+    response = await fetch(base + '/api/backup-password/rotate', { method: 'POST', headers: { origin: base } });
+    assert.strictEqual(response.status, 200);
+    const rotated = await response.json();
+    assert.notStrictEqual(rotated.password, generated.password);
+    assert.strictEqual((await fs.readFile(managedFile, 'utf8')).trim(), rotated.password);
+    assert(!JSON.stringify(await get()).includes(rotated.password));
+    const rotatedName = await waitFor(async () => (await exports()).find(name => !beforeRotate.includes(name)));
+    const rotatedArchive = await fs.readFile(path.join(directory, rotatedName), 'utf8');
+    await backup.decryptBackup(rotatedArchive, rotated.password);
+    await assert.rejects(() => backup.decryptBackup(rotatedArchive, generated.password));
+    await backup.decryptBackup(originalArchive, generated.password);
+    await assert.rejects(() => backup.decryptBackup(originalArchive, rotated.password));
+    assert(general.includes('Remember to save in 1Password.'));
+    for (const id of ['create-backup-password', 'rotate-backup-password', 'backup-password-dialog', 'generated-backup-password']) assert(page.includes(`id="${id}"`));
     console.log('Backup Settings API tests passed');
   } finally {
     await stop();

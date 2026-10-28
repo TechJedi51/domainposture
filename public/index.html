@@ -21,7 +21,7 @@
   <header>
     <a class="brand" href="/" data-route="/">
       <img src="/domainposture.svg" alt="">
-      <span class="brand-copy"><strong>DomainPosture</strong><small id="version">v3.5.0</small></span>
+      <span class="brand-copy"><strong>DomainPosture</strong><small id="version">v3.6.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
       <a class="toolbar-button" href="/" data-route="/" aria-label="Dashboard" title="Dashboard"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span class="toolbar-label">Dashboard</span></a>
@@ -207,7 +207,10 @@
           <div><h2>Application backups</h2><p>Create encrypted recovery files in the backups folder for DBackup or another backup service to collect.</p></div>
           <label class="toggle"><input id="backup-enabled" type="checkbox" aria-controls="backup-fields"><span>Enable scheduled application backups</span></label>
           <div id="backup-fields" class="nested-settings">
-            <div class="field"><label for="backup-password-file">Backup password file</label><input id="backup-password-file" type="text" autocomplete="off" placeholder="/run/secrets/domainposture_backup_password" aria-describedby="backup-password-help"><p id="backup-password-help">Enter the file path inside the application system. Mount a separate password file read-only and save its password in 1Password. Use at least 20 bytes. The application secrets key is not the backup password.</p></div>
+            <div id="backup-password-status" class="settings-note status-line" role="status"></div>
+            <div class="settings-button-row"><button id="create-backup-password" class="secondary-action" type="button">Create backup password</button><button id="rotate-backup-password" class="secondary-action" type="button" hidden>Rotate backup password</button></div>
+            <p class="settings-note">Remember to save in 1Password. DomainPosture shows each generated password once. Keep previous passwords while older exports still need them. This password is separate from the secrets encryption key.</p>
+            <details><summary>External backup password (advanced)</summary><div class="field"><label for="backup-password-file">External password file</label><input id="backup-password-file" type="text" autocomplete="off" placeholder="Leave blank to use the managed password"><p>Optional path inside the application system. A mounted external password takes precedence over the managed password. Save settings before changing its source.</p></div></details>
             <div class="two-fields">
               <div class="field"><label for="backup-hour-utc">Daily backup hour (UTC)</label><input id="backup-hour-utc" type="number" min="0" max="23" step="1" required><p>0–23, on the hour. Enabling backups also creates an initial export.</p></div>
               <div class="field"><label for="backup-keep">Exports to keep</label><input id="backup-keep" type="number" min="1" max="365" step="1" required><p>Older exports are removed after a new export succeeds.</p></div>
@@ -334,6 +337,17 @@
       <p class="settings-note"><strong>Keep it private.</strong> Anyone with this key and your encrypted <code>secrets.json</code> file can read its saved passwords and webhooks.</p>
       <p id="copy-secrets-key-status" role="status"></p>
       <div class="dialog-actions"><button id="copy-secrets-key" class="secondary" type="button">Copy key</button><button id="close-secrets-key" type="button">I saved it securely</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="backup-password-dialog" class="editor-dialog recovery-key-dialog" aria-labelledby="backup-password-title">
+    <div class="recovery-key-content">
+      <div class="editor-heading"><small>One-time backup password</small><h2 id="backup-password-title">Save this backup password now</h2></div>
+      <p id="backup-password-description">Remember to save in 1Password. This password will not be shown again. You need it to recover encrypted application exports.</p>
+      <div class="field"><label for="generated-backup-password">Backup password</label><textarea id="generated-backup-password" rows="3" readonly spellcheck="false"></textarea></div>
+      <p class="settings-note">Keep it private. Anyone with this password and an export can recover its application data and secrets. Keep previous passwords while older exports still need them.</p>
+      <p id="copy-backup-password-status" role="status"></p>
+      <div class="settings-button-row"><button id="copy-backup-password" type="button">Copy password</button><button id="close-backup-password" type="button">I saved it securely</button></div>
     </div>
   </dialog>
 

@@ -23,7 +23,7 @@ async function run() {
     assert.strictEqual(await backup.readPassword(passwordFile), password);
     assert.strictEqual(backup.backupConfiguration({}), null);
     assert.deepStrictEqual(app.normalizeSettings({}).backups, { enabled: false, password_file: '', hour_utc: 2, keep: 7 });
-    assert.throws(() => backup.backupConfiguration({ enabled: true }), /password file/);
+    assert.strictEqual(backup.backupConfiguration({ enabled: true }).passwordFile, '/data/.domainposture-backup-password');
     const inputSettings = { enabled: true, password_file: passwordFile };
     const configuration = backup.backupConfiguration(inputSettings);
     assert.strictEqual(configuration.hour, 2);

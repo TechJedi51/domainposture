@@ -605,6 +605,17 @@ function renderSecretsKeySettings(settings = state.settings) {
   }
 }
 
+function renderBackupPasswordSettings(settings = state.settings) {
+  const password = settings?.backup_password || {};
+  const status = $('#backup-password-status');
+  const source = password.source === 'external' ? 'an external file' : 'DomainPosture';
+  const message = password.error || (password.configured ? `A backup password is configured and provided by ${source}. Remember to save in 1Password.` : 'Create a backup password before enabling backups. Remember to save in 1Password.');
+  status.className = 'settings-note status-line';
+  status.innerHTML = `<span class="dot ${password.configured ? 'healthy' : 'critical'}" aria-hidden="true"></span><span>${esc(message)}</span>`;
+  $('#create-backup-password').hidden = !password.can_generate;
+  $('#rotate-backup-password').hidden = !password.can_rotate;
+}
+
 function renderDiscordWebhookSettings(settings = state.settings) {
   const source = settings?.notifications?.discord_webhook_source;
   const configured = Boolean(settings?.notifications?.discord_webhook_configured);
@@ -626,6 +637,7 @@ async function loadSettings() {
   if (!response.ok) throw new Error(settings.error || 'Unable to load settings');
   state.settings = clone(settings);
   renderSecretsKeySettings(settings);
+  renderBackupPasswordSettings(settings);
   $('#report-days').value = settings.report_days;
   $('#refresh-minutes').value = settings.refresh_minutes;
   $('#backup-enabled').checked = settings.backups.enabled;
@@ -1118,6 +1130,7 @@ async function saveSettings(event) {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || 'Unable to save settings');
     state.settings = clone(result);
+    renderBackupPasswordSettings(result);
     renderSecretsKeySettings(result);
     $('#discord-webhook').value = '';
     state.editingDiscordWebhook = false;
@@ -1204,6 +1217,57 @@ function showSecretsRecoveryKey(result, rotated = false) {
   $('#secrets-key-dialog').showModal();
   $('#copy-secrets-key').focus();
 }
+async function manageBackupPassword(rotated = false) {
+  if ($('#backup-password-file').value.trim() !== (state.settings?.backups?.password_file || '')) {
+    $('#backup-password-status').textContent = 'Save settings before changing the backup password source.';
+    return;
+  }
+  if (rotated && !confirm('Rotate the backup password? Existing exports keep their old password. Keep the old password in 1Password and save the new password when it appears.')) return;
+  const create = $('#create-backup-password');
+  const rotate = $('#rotate-backup-password');
+  create.disabled = rotate.disabled = true;
+  try {
+    const response = await fetch(rotated ? '/api/backup-password/rotate' : '/api/backup-password', { method: 'POST' });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'Unable to create the backup password.');
+    state.settings.backup_password = { configured: true, source: 'managed', can_generate: false, can_rotate: true };
+    renderBackupPasswordSettings();
+    $('#backup-password-title').textContent = rotated ? 'Save the new backup password now' : 'Save this backup password now';
+    $('#backup-password-description').textContent = rotated
+      ? 'Remember to save in 1Password. New exports use this password. Existing exports still need their previous password. This password will not be shown again.'
+      : 'Remember to save in 1Password. This password will not be shown again. You need it to recover encrypted application exports.';
+    $('#generated-backup-password').value = result.password;
+    $('#copy-backup-password-status').textContent = '';
+    $('#backup-password-dialog').showModal();
+    $('#copy-backup-password').focus();
+  } catch (error) {
+    $('#backup-password-status').textContent = error.message;
+  } finally { create.disabled = rotate.disabled = false; }
+}
+$('#create-backup-password').onclick = () => manageBackupPassword();
+$('#rotate-backup-password').onclick = () => manageBackupPassword(true);
+$('#copy-backup-password').onclick = async () => {
+  try {
+    await navigator.clipboard.writeText($('#generated-backup-password').value);
+    $('#copy-backup-password-status').textContent = 'Password copied. Remember to save in 1Password.';
+  } catch (_) {
+    $('#generated-backup-password').select();
+    $('#copy-backup-password-status').textContent = 'Copy was unavailable. The password is selected so you can copy it manually. Remember to save in 1Password.';
+  }
+};
+$('#close-backup-password').onclick = () => {
+  $('#backup-password-dialog').close();
+};
+$('#backup-password-dialog').addEventListener('close', () => {
+  $('#generated-backup-password').value = '';
+  $('#copy-backup-password-status').textContent = '';
+  $('#create-backup-password').focus();
+  if ($('#create-backup-password').hidden) $('#rotate-backup-password').focus();
+});
+$('#backup-password-dialog').addEventListener('cancel', event => {
+  event.preventDefault();
+  $('#copy-backup-password-status').textContent = 'Remember to save in 1Password, then choose “I saved it securely.”';
+});
 $('#create-secrets-key').onclick = async () => {
   const button = $('#create-secrets-key');
   button.disabled = true;
