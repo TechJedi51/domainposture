@@ -21,7 +21,7 @@
   <header>
     <a class="brand" href="/" data-route="/">
       <img src="/domainposture.svg" alt="">
-      <span class="brand-copy"><strong>DomainPosture</strong><small id="version">v3.6.1</small></span>
+      <span class="brand-copy"><strong>DomainPosture</strong><small id="version">v3.7.0</small></span>
     </a>
     <nav class="topnav" aria-label="Primary navigation">
       <a class="toolbar-button" href="/" data-route="/" aria-label="Dashboard" title="Dashboard"><span class="toolbar-icon dashboard-icon" aria-hidden="true"></span><span class="toolbar-label">Dashboard</span></a>
@@ -197,6 +197,22 @@
             <div class="field"><label for="report-days">Report history</label><div class="number-with-unit"><input id="report-days" type="number" min="1" max="365" required><span>days</span></div></div>
             <div class="field"><label for="refresh-minutes">Refresh interval</label><div class="number-with-unit"><input id="refresh-minutes" type="number" min="1" max="1440" required><span>minutes</span></div></div>
             <div class="field"><label for="certificate-check-minutes">Certificate interval</label><div class="number-with-unit"><input id="certificate-check-minutes" type="number" min="5" max="10080" required><span>minutes</span></div></div>
+          </div>
+          <div class="field">
+            <label for="dns-resolver">DNS resolver for record checks</label>
+            <select id="dns-resolver" aria-describedby="dns-resolver-help">
+              <option value="system">System / Docker default</option>
+              <option value="cloudflare">Cloudflare (1.1.1.1, 1.0.0.1)</option>
+              <option value="google">Google (8.8.8.8, 8.8.4.4)</option>
+              <option value="quad9">Quad9 without threat blocking (9.9.9.10, 149.112.112.10)</option>
+              <option value="manual">Manual addresses</option>
+            </select>
+            <p id="dns-resolver-help">Applies to SPF, DKIM, DMARC, BIMI, MTA-STS and TLS reporting records, and DNS monitoring. The container resolver still handles certificate and service connections. Public presets send these record queries to the selected provider.</p>
+          </div>
+          <div class="field" id="dns-manual-field" hidden>
+            <label for="dns-manual-servers">DNS server addresses</label>
+            <input id="dns-manual-servers" type="text" autocomplete="off" spellcheck="false" placeholder="192.0.2.53, 2001:db8::53">
+            <p>Enter up to four IPv4 or IPv6 addresses, separated by commas or spaces.</p>
           </div>
           <div class="field"><label for="request-timeout">Request timeout</label><div class="number-with-unit"><input id="request-timeout" type="number" min="1000" max="60000" step="100" required><span>milliseconds</span></div></div>
           <div class="field"><label for="smtp-probe-cooldown">SMTP probe cooldown</label><div class="number-with-unit"><input id="smtp-probe-cooldown" type="number" min="5" max="1440" required><span>minutes</span></div><p>Limits each MX host to one live probe during this period. Shared MX hosts are checked once and reused across domains.</p></div>

@@ -349,6 +349,33 @@ function isMissingMtaSts(check) {
   return check?.summary === 'Not configured' && Array.isArray(check?.evidence?.raw_dns) && check.evidence.raw_dns.length === 0;
 }
 
+const DNS_RESOLVER_PRESETS = {
+  system: [],
+  cloudflare: ['1.1.1.1', '1.0.0.1'],
+  google: ['8.8.8.8', '8.8.4.4'],
+  quad9: ['9.9.9.10', '149.112.112.10']
+};
+
+function normalizeDnsResolver(input = {}) {
+  const provider = input?.provider ?? 'system';
+  if (typeof provider !== 'string' || (provider !== 'manual' && !Object.hasOwn(DNS_RESOLVER_PRESETS, provider))) {
+    throw new Error('Choose a supported DNS resolver.');
+  }
+  const servers = input?.servers ?? [];
+  if (!Array.isArray(servers) || servers.length > 4 || servers.some(server => typeof server !== 'string' || !net.isIP(server))) {
+    throw new Error('Enter up to four IPv4 or IPv6 addresses for manual DNS.');
+  }
+  if (provider === 'manual' && !servers.length) throw new Error('Enter at least one DNS server address.');
+  return { provider, servers: [...new Set(servers)] };
+}
+
+function monitoringDnsResolver(settings, timeoutMs) {
+  const servers = settings.provider === 'manual' ? settings.servers : DNS_RESOLVER_PRESETS[settings.provider];
+  const resolver = new dns.Resolver({ timeout: Math.min(5000, timeoutMs), tries: 1 });
+  if (servers.length) resolver.setServers(servers);
+  return resolver;
+}
+
 function normalizeSettings(input = {}) {
   const domains = [...new Set((Array.isArray(input.monitored_domains) ? input.monitored_domains : []).map(v => String(v).trim().toLowerCase().replace(/\.$/, '')).filter(Boolean))];
   for (const domain of domains) if (!validDomain(domain)) throw new Error(`Invalid monitored domain: ${domain}`);
@@ -414,6 +441,7 @@ function normalizeSettings(input = {}) {
     control_exceptions: normalizeControlExceptions(input.control_exceptions, domains),
     report_days: boundedNumber(input.report_days, 7, 1, 365, 'Report days'),
     refresh_minutes: boundedNumber(input.refresh_minutes, 15, 1, 1440, 'Refresh minutes'),
+    dns_resolver: normalizeDnsResolver(input.dns_resolver),
     request_timeout_ms: boundedNumber(input.request_timeout_ms, 8000, 1000, 60000, 'Request timeout'),
     opensearch_enabled: reportSource !== 'disabled',
     report_source: reportSource,
@@ -902,6 +930,7 @@ async function saveSettingsUnlocked(value) {
 
 function settingsConfig(settings = getSettings()) {
   return {
+    dns_resolver: settings.dns_resolver,
     smtp_probe_hostname: settings.smtp_probe_hostname,
     smtp_probe_cooldown_minutes: settings.smtp_probe_cooldown_minutes,
     dns_change_confirmations: settings.dns_change_confirmations,
@@ -1125,12 +1154,12 @@ function tags(record) {
     const i = term.indexOf('='); return i < 0 ? [term.toLowerCase(), ''] : [term.slice(0, i).trim().toLowerCase(), term.slice(i + 1).trim()];
   }));
 }
-async function txt(name) { return (await dns.resolveTxt(name)).map(parts => parts.join('')); }
+async function txt(name, resolver = dns) { return (await resolver.resolveTxt(name)).map(parts => parts.join('')); }
 function protocol(records, prefix) { return records.filter(v => v.trim().toLowerCase().startsWith(prefix.toLowerCase())); }
 
-async function dmarc(domain) {
+async function dmarc(domain, resolver) {
   try {
-    const found = protocol(await txt(`_dmarc.${domain}`), 'v=DMARC1');
+    const found = protocol(await txt(`_dmarc.${domain}`, resolver), 'v=DMARC1');
     if (found.length !== 1) return result('dmarc', 'DMARC', 'critical', found.length ? 'Multiple DMARC records' : 'No DMARC policy', 'Receivers require exactly one DMARC1 TXT record.', 'Publish exactly one DMARC record with aggregate reporting.', { records: found });
     const parsed = tags(found[0]); const policy = (parsed.p || '').toLowerCase(); const pct = Number(parsed.pct || 100); const issues = [];
     if (!policy) issues.push('The required p tag is missing.');
@@ -1161,14 +1190,14 @@ function policyFile(body) {
 }
 function mxMatch(host, pattern) { const h = host.toLowerCase().replace(/\.$/, ''); const p = pattern.toLowerCase().replace(/\.$/, ''); return p.startsWith('*.') ? h.endsWith(p.slice(1)) && h !== p.slice(2) : h === p; }
 
-async function mtaSts(domain) {
+async function mtaSts(domain, resolver = dns) {
   const evidence = {};
   try {
-    const rawRecords = await txt(`_mta-sts.${domain}`); const records = protocol(rawRecords, 'v=STSv1'); evidence.raw_dns = rawRecords; evidence.dns = records;
+    const rawRecords = await txt(`_mta-sts.${domain}`, resolver); const records = protocol(rawRecords, 'v=STSv1'); evidence.raw_dns = rawRecords; evidence.dns = records;
     if (records.length !== 1) return result('mta_sts', 'MTA-STS', 'critical', 'Not configured', 'Expected exactly one STSv1 DNS signal.', 'Publish the DNS signal and a valid HTTPS policy.', evidence);
     const response = await get(`https://mta-sts.${domain}/.well-known/mta-sts.txt`, 65536); evidence.http_status = response.status;
     if (response.status !== 200) return result('mta_sts', 'MTA-STS', 'critical', `Policy returned HTTP ${response.status}`, 'Senders require a successful policy fetch.', 'Serve the policy at the exact well-known path.', evidence);
-    const policy = policyFile(response.body); const mx = await dns.resolveMx(domain); evidence.policy = policy; evidence.domain_mx = mx;
+    const policy = policyFile(response.body); const mx = await resolver.resolveMx(domain); evidence.policy = policy; evidence.domain_mx = mx;
     if (policy.version !== 'STSv1' || !['enforce', 'testing', 'none'].includes(policy.mode) || !policy.max_age || (policy.mode !== 'none' && !(policy.mx || []).length)) return result('mta_sts', 'MTA-STS', 'critical', 'Invalid policy', 'Required policy fields are missing or invalid.', 'Set version, mode, max_age, and the MX entries.', evidence);
     const uncovered = mx.map(v => v.exchange).filter(host => !(policy.mx || []).some(pattern => mxMatch(host, pattern)));
     if (uncovered.length) return result('mta_sts', 'MTA-STS', 'critical', 'MX hosts not covered', uncovered.join(', '), 'Add every active mail exchanger to the policy.', evidence);
@@ -1259,12 +1288,12 @@ async function domainCertificateComponent(entry, config, options = {}) {
   return sslMonitor.componentResult(entry.domain, checks);
 }
 
-async function dkim(domain, selectors, mailProfile = {}) {
+async function dkim(domain, selectors, mailProfile = {}, resolver) {
   if (!selectors.length) return result('dkim', 'DKIM', 'warning', 'No selectors configured', 'Selectors cannot be discovered reliably from DNS.', 'Add the active selectors for this domain in Settings.');
   const keys = [];
   for (const selector of selectors) {
     try {
-      const found = protocol(await txt(`${selector}._domainkey.${domain}`), 'v=DKIM1'); if (found.length !== 1) { keys.push({ selector, status: 'critical', issue: found.length ? 'multiple records' : 'record missing' }); continue; }
+      const found = protocol(await txt(`${selector}._domainkey.${domain}`, resolver), 'v=DKIM1'); if (found.length !== 1) { keys.push({ selector, status: 'critical', issue: found.length ? 'multiple records' : 'record missing' }); continue; }
       const parsed = tags(found[0]); if (!parsed.p) { keys.push({ selector, status: 'critical', issue: 'key missing or revoked' }); continue; }
       let bits = null; try { const pem = `-----BEGIN PUBLIC KEY-----\n${parsed.p.match(/.{1,64}/g).join('\n')}\n-----END PUBLIC KEY-----`; bits = crypto.createPublicKey(pem).asymmetricKeyDetails?.modulusLength || null; } catch (_) {}
       keys.push({ selector, bits, status: bits && bits < 1024 ? 'critical' : bits && bits < 2048 ? 'warning' : 'healthy', issue: bits && bits < 2048 ? `${bits}-bit RSA key` : null });
@@ -1494,6 +1523,8 @@ function reconcileMtaSts(stsCheck, smtpCheck) {
 }
 
 async function checkDomain(entry, config, options = {}) {
+  const resolver = config.dns_resolver.provider === 'system' ? undefined : monitoringDnsResolver(config.dns_resolver, requestTimeoutMs);
+  const dnsOptions = { timeout_ms: requestTimeoutMs, resolver };
   const sections = { ...DEFAULT_CHECK_SECTIONS, ...(entry.check_sections || {}) };
   const mailFeaturesEnabled = sections.mail_security || sections.smtp || sections.dkim || sections.bimi;
   const mailProfile = mailFeaturesEnabled
@@ -1501,21 +1532,21 @@ async function checkDomain(entry, config, options = {}) {
     : smtpProfile(entry.domain, entry.smtp_profile, []);
   const noInbound = mailProfile.hosting_type === 'no_inbound';
   const notApplicable = (id, label) => result(id, label, 'info', 'Not applicable', 'This domain is configured not to receive inbound email.', 'No action required while inbound mail remains disabled.', { mail_profile: mailProfile });
-  const dm = sections.mail_security || sections.bimi ? await dmarc(entry.domain) : null;
+  const dm = sections.mail_security || sections.bimi ? await dmarc(entry.domain, resolver) : null;
   const [senderPolicy, stsResult, tlsreport, smtpService, brand, keys, aggregate, failures, smtpTls, reputation, certs, sslCertificates, dnsMonitoring] = await Promise.all([
-    sections.mail_security ? spfCheck(entry.domain, { timeout_ms: requestTimeoutMs, mail_profile: mailProfile }) : null,
-    sections.mail_security ? (noInbound ? Promise.resolve(notApplicable('mta_sts', 'MTA-STS')) : mtaSts(entry.domain)) : null,
-    sections.mail_security ? (noInbound ? Promise.resolve(notApplicable('tls_rpt', 'TLS reporting')) : tlsRptCheck(entry.domain, { timeout_ms: requestTimeoutMs })) : null,
+    sections.mail_security ? spfCheck(entry.domain, { ...dnsOptions, mail_profile: mailProfile }) : null,
+    sections.mail_security ? (noInbound ? Promise.resolve(notApplicable('mta_sts', 'MTA-STS')) : mtaSts(entry.domain, resolver)) : null,
+    sections.mail_security ? (noInbound ? Promise.resolve(notApplicable('tls_rpt', 'TLS reporting')) : tlsRptCheck(entry.domain, dnsOptions)) : null,
     sections.smtp ? smtpDiagnostics(entry.domain, { timeout_ms: requestTimeoutMs, profile: mailProfile, ehlo_hostname: config.smtp_probe_hostname, cooldown_ms: config.smtp_probe_cooldown_minutes * 60000 }) : null,
-    sections.bimi ? bimi(entry.domain, dm, entry.bimi_exception) : null,
-    sections.dkim ? dkim(entry.domain, entry.dkim_selectors, mailProfile) : null,
+    sections.bimi ? bimi(entry.domain, dm, entry.bimi_exception, { txt: name => txt(name, resolver) }) : null,
+    sections.dkim ? dkim(entry.domain, entry.dkim_selectors, mailProfile, resolver) : null,
     sections.mail_security ? reports(entry.domain, config.opensearch, entry.report_days) : null,
     sections.mail_security ? failureReports(entry.domain, config.opensearch, entry.report_days) : null,
     sections.mail_security ? smtpTlsReports(entry.domain, config.opensearch, entry.report_days) : null,
     sections.mail_security ? reputationCheck(entry.domain, { timeout_ms: requestTimeoutMs }) : null,
     sections.additional_tls ? Promise.all(entry.tls_endpoints.map(certificate)) : [],
     sections.domain_certificates ? domainCertificateComponent(entry, config, options) : null,
-    entry.dns_monitoring_enabled && entry.dns_monitors.length ? dnsTools.checkDnsMonitors(entry.dns_monitors, { timeout_ms: requestTimeoutMs }) : []
+    entry.dns_monitoring_enabled && entry.dns_monitors.length ? dnsTools.checkDnsMonitors(entry.dns_monitors, dnsOptions) : []
   ]);
   let sts = stsResult;
   if (sts) {
@@ -1751,6 +1782,10 @@ async function refresh(options = {}) {
         const entries = options.domain ? config.domains.filter(entry => entry.domain === options.domain) : config.domains;
         if (options.domain && !entries.length) throw new Error('The requested domain is not monitored.');
         run.timeout_ms = requestTimeoutMs;
+        run.dns_resolver = {
+          provider: config.dns_resolver.provider,
+          servers: monitoringDnsResolver(config.dns_resolver, requestTimeoutMs).getServers()
+        };
         const results = await Promise.allSettled(entries.map(async entry => {
           const domain = await checkDomain(entry, config, { forceCertificates: options.forceCertificates === true });
           run.domains.push({
@@ -1949,4 +1984,4 @@ function start() {
   configureApplicationBackups(getSettings()).catch(() => reportApplicationBackup('error', 'Application backup scheduling failed. Review Settings → General.'));
   server.listen(PORT,'0.0.0.0',()=>{ console.log(`DomainPosture listening on :${PORT}`); addDiagnosticEvent('domainposture', 'info', 'DomainPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh({ trigger: 'startup' }); }); }
 if (require.main === module) start();
-module.exports = { captureApplicationBackup, withPersistenceLock, assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeControlExceptions, normalizeSmtpProfiles, normalizeCertificateChecks, normalizeCheckSections, normalizeNotifications, normalizeDnsMonitors, normalizeDnsMonitoringEnabled, validDiscordWebhookUrl, discordWebhookConfiguration, decodeSecretsKey, decodeManagedSecretsKeyFile, secretsKeyConfiguration, createManagedSecretsKey, rotateManagedSecretsKey, encryptSecrets, decryptSecrets, decryptSecretsWithKeys, encryptedSecretsDocument, secretsStorageStatus, testDiscordNotification, activeBimiException, applyMissingControlException, isMissingMtaSts, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, domainScore, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, certificate, domainCertificateComponent, processDnsChangeNotifications, processNotifications, sameOriginRequest, refresh, getOperationalState, getSnapshot:()=>snapshot };
+module.exports = { monitoringDnsResolver, captureApplicationBackup, withPersistenceLock, assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeControlExceptions, normalizeSmtpProfiles, normalizeCertificateChecks, normalizeCheckSections, normalizeNotifications, normalizeDnsMonitors, normalizeDnsMonitoringEnabled, validDiscordWebhookUrl, discordWebhookConfiguration, decodeSecretsKey, decodeManagedSecretsKeyFile, secretsKeyConfiguration, createManagedSecretsKey, rotateManagedSecretsKey, encryptSecrets, decryptSecrets, decryptSecretsWithKeys, encryptedSecretsDocument, secretsStorageStatus, testDiscordNotification, activeBimiException, applyMissingControlException, isMissingMtaSts, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, domainScore, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, certificate, domainCertificateComponent, processDnsChangeNotifications, processNotifications, sameOriginRequest, refresh, getOperationalState, getSnapshot:()=>snapshot };
