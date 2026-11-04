@@ -1713,8 +1713,33 @@ async function processNotifications(domainResult, settings, send = sendDiscordMe
   }
 }
 
+async function recordCheckHistory(run) {
+  const directory = path.join(path.dirname(STATE_PATH), 'logs', 'checks');
+  const day = run.finished_at.slice(0, 10);
+  const filename = path.join(directory, day + '.jsonl');
+  try {
+    await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
+    await fs.promises.appendFile(filename, JSON.stringify(run) + '\n', { mode: 0o600 });
+    const cutoff = Date.parse(run.finished_at) - 72 * 60 * 60 * 1000;
+    for (const entry of await fs.promises.readdir(directory, { withFileTypes: true })) {
+      if (!entry.isFile() || !/^\d{4}-\d{2}-\d{2}\.jsonl$/.test(entry.name)) continue;
+      const endOfDay = Date.parse(entry.name.slice(0, 10) + 'T00:00:00Z') + 86400000;
+      if (endOfDay <= cutoff) await fs.promises.unlink(path.join(directory, entry.name));
+    }
+  } catch (_) {
+    addDiagnosticEvent('domainposture', 'warning', 'Check history could not be saved or pruned', 'Verify write access and available space on the persistent data volume.');
+  }
+}
+
 async function refresh(options = {}) {
   if (activeRefresh) return activeRefresh;
+  const startedAt = new Date().toISOString();
+  const run = {
+    started_at: startedAt,
+    trigger: options.trigger || (options.forceCertificates ? 'manual' : 'scheduled'),
+    domain: options.domain || null,
+    domains: []
+  };
   snapshot.refreshing = true;
   activeRefresh = (async () => {
     try {
@@ -1725,7 +1750,39 @@ async function refresh(options = {}) {
       } else {
         const entries = options.domain ? config.domains.filter(entry => entry.domain === options.domain) : config.domains;
         if (options.domain && !entries.length) throw new Error('The requested domain is not monitored.');
-        const checked = await Promise.all(entries.map(entry => checkDomain(entry, config, { forceCertificates: options.forceCertificates === true })));
+        run.timeout_ms = requestTimeoutMs;
+        const results = await Promise.allSettled(entries.map(async entry => {
+          const domain = await checkDomain(entry, config, { forceCertificates: options.forceCertificates === true });
+          run.domains.push({
+            domain: domain.domain,
+            checks: domain.checks.map(check => ({
+              id: check.id,
+              status: check.status,
+              summary: redactLogText(check.summary).slice(0, 300),
+              ...(check.id === 'spf' ? {
+                dns_lookup_terms: check.evidence?.dns_lookup_terms,
+                temporary_errors: (check.evidence?.temporary_errors || []).map(error => redactLogText(error).slice(0, 500))
+              } : {}),
+              ...(check.id === 'ssl_certificates' ? {
+                certificates: (check.evidence?.checks || []).map(certificate => ({
+                  type: certificate.check_type,
+                  status: certificate.status,
+                  checked_at: certificate.checked_at,
+                  cached: Date.parse(certificate.checked_at) < Date.parse(startedAt),
+                  expires_at: certificate.not_after,
+                  error: redactLogText(certificate.error).slice(0, 500)
+                }))
+              } : {})
+            })),
+            dns_monitors: (domain.reports?.dns_monitoring?.records || []).map(record => ({
+              host: record.host, type: record.type, status: record.status
+            }))
+          });
+          return domain;
+        }));
+        const failure = results.find(item => item.status === 'rejected');
+        if (failure) throw failure.reason;
+        const checked = results.map(item => item.value);
         if (options.domain) {
           const replacements = new Map(checked.map(domain => [domain.domain, domain]));
           domains = snapshot.domains.map(domain => replacements.get(domain.domain) || domain);
@@ -1753,9 +1810,13 @@ async function refresh(options = {}) {
         }
       };
     } catch (error) {
+      run.error = redactLogText(error.message).slice(0, 500);
       addDiagnosticEvent('domainposture', 'error', 'Domain checks failed', error.message);
       snapshot = { ...snapshot, generated_at: new Date().toISOString(), refreshing: false, error: error.message };
-    } finally { activeRefresh = null; }
+    } finally {
+      if (process.env.DEMO_MODE !== 'true') await recordCheckHistory({ ...run, finished_at: new Date().toISOString() });
+      activeRefresh = null;
+    }
     return snapshot;
   })();
   return activeRefresh;
@@ -1808,7 +1869,7 @@ function scheduleRefreshAfterSettingsSave(settings) {
         }
       }
       if (precedingRefresh) await precedingRefresh;
-      await refresh();
+      await refresh({ trigger: 'settings-save' });
     } catch (error) {
       addDiagnosticEvent('domainposture', 'error', 'Background refresh after settings save failed', error.message);
     }
@@ -1886,6 +1947,6 @@ function configureApplicationBackups(settings, force = false) {
 
 function start() {
   configureApplicationBackups(getSettings()).catch(() => reportApplicationBackup('error', 'Application backup scheduling failed. Review Settings → General.'));
-  server.listen(PORT,'0.0.0.0',()=>{ console.log(`DomainPosture listening on :${PORT}`); addDiagnosticEvent('domainposture', 'info', 'DomainPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh(); }); }
+  server.listen(PORT,'0.0.0.0',()=>{ console.log(`DomainPosture listening on :${PORT}`); addDiagnosticEvent('domainposture', 'info', 'DomainPosture started', `Version ${APP_VERSION} is listening on port ${PORT}.`); try { scheduleRefresh(getSettings().refresh_minutes); } catch (_) { scheduleRefresh(15); } refresh({ trigger: 'startup' }); }); }
 if (require.main === module) start();
 module.exports = { captureApplicationBackup, withPersistenceLock, assignments, envConfig, normalizeSettings, settingsConfig, tags, policyFile, mxMatch, selectSourceField, summarizeDmarcReporters, summarizeSmtpHits, smtpOrganization, parsedmarcIni, parsedmarcConfigurationStatus, overallStatus, systemStatus, diagnosticLog, redactLogText, normalizeBimiExceptions, normalizeControlExceptions, normalizeSmtpProfiles, normalizeCertificateChecks, normalizeCheckSections, normalizeNotifications, normalizeDnsMonitors, normalizeDnsMonitoringEnabled, validDiscordWebhookUrl, discordWebhookConfiguration, decodeSecretsKey, decodeManagedSecretsKeyFile, secretsKeyConfiguration, createManagedSecretsKey, rotateManagedSecretsKey, encryptSecrets, decryptSecrets, decryptSecretsWithKeys, encryptedSecretsDocument, secretsStorageStatus, testDiscordNotification, activeBimiException, applyMissingControlException, isMissingMtaSts, bimi, globPattern, matchesIndexPattern, unassignedShardSummary, validCron, summarize, domainScore, reconcileMtaSts, smtpDiagnostics, evaluateSmtpEvidence, smtpResult, smtpBannerHostname, smtpCapabilities, validSmtpHostname, smtpTimingTest, smtpProfile, spfCheck, tlsRptCheck, reputationCheck, validateTlsRptRecord, reverseIp, certificate, domainCertificateComponent, processDnsChangeNotifications, processNotifications, sameOriginRequest, refresh, getOperationalState, getSnapshot:()=>snapshot };

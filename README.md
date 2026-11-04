@@ -361,6 +361,22 @@ OpenSearch separately. Restart and verify settings, secret availability, and rep
 collection. Roll back by stopping the services and restoring the preserved data and
 deployment configuration. No automatic live restore is performed.
 
+### Domain check history
+
+DomainPosture writes one JSON line per scan to `/data/logs/checks/YYYY-MM-DD.jsonl`
+using UTC dates. These files survive container restarts and keep at least the last
+72 hours of scans. Each scan removes daily files whose entire day is older than
+72 hours. History starts with the first scan after upgrading and is independent
+of the service log setting. The files contain check summaries, SPF lookup errors,
+and certificate attempt timestamps and errors. A cached certificate result is
+marked so it can be distinguished from a fresh probe.
+
+To inspect the current UTC day's scans from the Docker host:
+
+```sh
+docker exec domainposture sh -c 'cat "/data/logs/checks/$(date -u +%F).jsonl"'
+```
+
 ## Health and troubleshooting
 
 `GET /healthz` returns the application version and process health. **System Status** checks storage, encrypted secret availability, the ssl-watch executable, OpenSearch, report indexes, generated ParseDMARC configuration, and the collector heartbeat.
